@@ -513,6 +513,9 @@ const ProductService = {
       ? `COALESCE(jsonb_agg(DISTINCT to_jsonb(jsonb_build_object('id', m.id, 'url', m.url, 'type', m.type))) FILTER (WHERE m.id IS NOT NULL), '[]') AS media,`
       : `'[]'::jsonb AS media,`;
 
+    // Aggregate mapped categories
+    const aggMappedCategories = `COALESCE(jsonb_agg(DISTINCT to_jsonb(jsonb_build_object('id', mc.id, 'name', mc.name, 'slug', mc.slug, 'path', mc.path))) FILTER (WHERE mc.id IS NOT NULL), '[]') AS mapped_categories,`;
+
     // We'll preserve order using array_position on the ids array (passed as param $1 for the aggregation query).
     // const mainSQL = `
     //       SELECT
@@ -553,6 +556,7 @@ const ProductService = {
     ${aggCategories}
     ${aggFilters}
     ${aggMedia}
+    ${aggMappedCategories}
 
     COUNT(DISTINCT pv.id) AS variant_count
 
@@ -562,6 +566,8 @@ const ProductService = {
   LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
   LEFT JOIN product_dynamic_filters pdf ON pdf.product_id = p.id AND pdf.deleted_at IS NULL
   LEFT JOIN media m ON (m.variant_id = pv.id AND m.deleted_at IS NULL)
+  LEFT JOIN product_our_category_map pom ON pom.product_id = p.id
+  LEFT JOIN categories mc ON mc.id = pom.our_category_id AND mc.deleted_at IS NULL
   WHERE p.id = ANY($1)
   GROUP BY p.id
   ORDER BY array_position($1::uuid[], p.id)
@@ -604,6 +610,7 @@ const ProductService = {
       categories: r.categories || [],
       dynamic_filters: r.dynamic_filters || [],
       media: r.media || [],
+      mapped_categories: r.mapped_categories || [],
       variant_count: Number(r.variant_count || 0),
     }));
 

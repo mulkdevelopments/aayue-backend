@@ -5,7 +5,13 @@
   "main": "server.js",
   "scripts": {
     "dev": "nodemon server.js",
-    "migrate": "node src/migrations/migrate.js"
+    "dev:local": "node scripts/load-env.js local && nodemon server.js",
+    "dev:docker": "node scripts/load-env.js docker && nodemon server.js",
+    "migrate": "node src/migrations/migrate.js",
+    "db:tunnel": "node scripts/db-tunnel.js",
+    "db:tunnel:start": "node scripts/db-tunnel.js start",
+    "db:tunnel:stop": "node scripts/db-tunnel.js stop",
+    "db:tunnel:status": "node scripts/db-tunnel.js status"
   },
   "keywords": [],
   "author": "",

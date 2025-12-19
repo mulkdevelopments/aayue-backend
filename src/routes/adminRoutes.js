@@ -27,7 +27,6 @@ router.post(
   "/admin-login-with-magic-link",
   indexCtrl.adminAuthController.adminLoginWithMagicLink
 );
-
 router.use(protectAdmin);
 
 /** ================== Import Products via CSV ================== */
