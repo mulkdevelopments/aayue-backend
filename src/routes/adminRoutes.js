@@ -98,6 +98,7 @@ router.patch(
   "/update-product-price-by-vendor-id",
   indexCtrl.productManagementController.updateProductPriceByVendorId
 );
+
 /**================= Best Seller Routes ================ */
 
 router.post(

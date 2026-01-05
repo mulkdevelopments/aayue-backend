@@ -118,6 +118,12 @@ const BrandSpotlightService = {
       LEFT JOIN pv ON pv.product_id = p2.id
       WHERE p2.deleted_at IS NULL
         AND p2.brand_name = b.brand_name
+        AND (p2.vendor_id IS NULL OR EXISTS (
+          SELECT 1 FROM vendors v
+          WHERE v.id = p2.vendor_id
+            AND v.status = 'active'
+            AND v.deleted_at IS NULL
+        ))
       ORDER BY p2.created_at DESC
       LIMIT $2
     ) p ON true

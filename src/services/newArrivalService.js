@@ -100,7 +100,14 @@ const NewArrivalService = {
                  p.product_img2, p.product_img3, p.product_img4, p.product_img5, p.country_of_origin,
                  p.is_active, p.created_at, p.updated_at
           FROM products p
-          WHERE p.id = na.product_id AND p.deleted_at IS NULL
+          WHERE p.id = na.product_id
+            AND p.deleted_at IS NULL
+            AND (p.vendor_id IS NULL OR EXISTS (
+              SELECT 1 FROM vendors v
+              WHERE v.id = p.vendor_id
+                AND v.status = 'active'
+                AND v.deleted_at IS NULL
+            ))
           LIMIT 1
         ) prod_base
         LEFT JOIN LATERAL (
@@ -109,7 +116,8 @@ const NewArrivalService = {
             'sku', pv.sku,
             'price', pv.price,
             'mrp', pv.mrp,
-            'sale_price', pv.sale_price,
+            'vendorsaleprice', pv.vendorsaleprice,
+            'vendormrp', pv.vendormrp,
             'stock', pv.stock,
             'variant_color', pv.variant_color,
             'variant_size', pv.variant_size,

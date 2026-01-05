@@ -6,6 +6,9 @@ const cluster = require('cluster');
 const app = require('./app');
 const dbPool = require('./src/db/dbConnection'); // PostgreSQL Pool
 
+// Start email worker to process background jobs
+require('./src/lib/worker');
+
 const PORT = process.env.PORT || 5000;
 const isProd = process.env.NODE_ENV === 'production';
 const numCPUs = os.cpus().length;

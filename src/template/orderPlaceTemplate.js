@@ -2,7 +2,7 @@ module.exports.generateOrderConfirmationEmail = ({
   customerName,
   orderId,
   items,
-  currency = "AED",
+  currency = "€",
 }) => {
   // Validate input
   if (

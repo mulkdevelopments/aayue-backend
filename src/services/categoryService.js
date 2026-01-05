@@ -67,7 +67,8 @@ const CategoryService = {
                 metadata ? JSON.stringify(metadata) : null,
                 our_category,
                 is_our_category,
-                priority
+                priority,
+                image_url  // ✅ Added missing image_url parameter
             ]);
             return result.rows[0];
         }

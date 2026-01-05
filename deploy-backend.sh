@@ -18,22 +18,44 @@ echo "=========================================="
 chmod 400 "$KEY"
 
 # 2. Create directory on server
-echo "📂 Creating directory on server..."
+echo "📂 Ensuring app directory exists..."
 ssh -i "$KEY" -o StrictHostKeyChecking=no ubuntu@$IP "mkdir -p ~/app"
 
-# 3. Sync Files (Rsync)
-# We exclude frontend/admin folders since we only need backend
-echo "📤 Uploading files..."
-rsync -avz -e "ssh -i $KEY" \
-  --exclude 'node_modules' \
-  --exclude '.git' \
-  --exclude '.next' \
-  --exclude '.cache' \
-  --exclude 'dist' \
-  --exclude 'tmp' \
-  --exclude 'ecommerce-aayeu-frontend-main' \
-  --exclude 'ecommerce-aayeu-admin-main' \
-  ./ ubuntu@$IP:~/app/
+# 3. Sync Files
+# Check if rsync is available, otherwise use scp
+echo "📤 Uploading files to ~/app/..."
+if command -v rsync &> /dev/null; then
+  # Use rsync if available (faster, incremental)
+  rsync -avz -e "ssh -i $KEY" \
+    --exclude 'node_modules' \
+    --exclude '.git' \
+    --exclude '.next' \
+    --exclude '.cache' \
+    --exclude 'dist' \
+    --exclude 'tmp' \
+    --exclude 'te' \
+    --exclude 'ecommerce-backend-main' \
+    --exclude 'ecommerce-aayeu-frontend-main' \
+    --exclude 'ecommerce-aayeu-admin-main' \
+    ./ ubuntu@$IP:~/app/
+else
+  # Fallback to tar + scp (works on Git Bash for Windows)
+  echo "rsync not found, using tar+scp instead..."
+  tar --exclude='node_modules' \
+      --exclude='.git' \
+      --exclude='.next' \
+      --exclude='.cache' \
+      --exclude='dist' \
+      --exclude='tmp' \
+      --exclude='te' \
+      --exclude='ecommerce-backend-main' \
+      --exclude='ecommerce-aayeu-frontend-main' \
+      --exclude='ecommerce-aayeu-admin-main' \
+      -czf /tmp/backend-deploy.tar.gz .
+  scp -i "$KEY" -o StrictHostKeyChecking=no /tmp/backend-deploy.tar.gz ubuntu@$IP:/tmp/
+  ssh -i "$KEY" ubuntu@$IP "cd ~/app && tar -xzf /tmp/backend-deploy.tar.gz && rm /tmp/backend-deploy.tar.gz"
+  rm /tmp/backend-deploy.tar.gz
+fi
 
 echo "✅ Upload complete."
 
@@ -41,7 +63,7 @@ echo "✅ Upload complete."
 echo "🐳 Starting Docker containers on server..."
 ssh -i "$KEY" ubuntu@$IP << EOF
   cd ~/app
-  
+
   # Install Docker if needed
   if ! command -v docker &> /dev/null; then
       echo "Installing Docker..."
@@ -58,16 +80,21 @@ ssh -i "$KEY" ubuntu@$IP << EOF
       sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   fi
 
-  # Stop old containers (including frontend/admin if they were running)
-  sudo docker compose -f docker-compose.test.yml down || true
-  sudo docker compose -f docker-compose.backend.yml down || true
+  # Stop old containers
+  echo "🛑 Stopping existing containers..."
+  sudo docker compose -f docker-compose.test.yml down 2>/dev/null || true
+  sudo docker compose -f docker-compose.prod.yml down 2>/dev/null || true
+  sudo docker compose -f docker-compose.backend.yml down 2>/dev/null || true
 
-  # Clean up old frontend/admin directories to save space
-  echo "🧹 Cleaning up old frontend and admin files..."
-  rm -rf ecommerce-aayeu-frontend-main ecommerce-aayeu-admin-main
+  # Remove old backend image to force fresh build
+  echo "🗑️  Removing old backend image..."
+  sudo docker rmi app-backend 2>/dev/null || true
+  sudo docker rmi \$(sudo docker images -q -f "dangling=true") 2>/dev/null || true
 
-  # Start Backend Services
-  sudo docker compose -f docker-compose.backend.yml up -d --build
+  # Build and start Backend Services with no-cache to ensure fresh build
+  echo "🔨 Building and starting backend containers..."
+  sudo docker compose -f docker-compose.backend.yml build --no-cache backend
+  sudo docker compose -f docker-compose.backend.yml up -d
 
   # Update Caddy Configuration
   echo "🔄 Updating Caddy configuration..."

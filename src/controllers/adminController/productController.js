@@ -1223,12 +1223,12 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
 
     if (min_price) {
       params.push(Number(min_price));
-      filterWhere += ` AND COALESCE(pv.sale_price, pv.price) >= $${params.length}`;
+      filterWhere += ` AND pv.price >= $${params.length}`;
     }
 
     if (max_price) {
       params.push(Number(max_price));
-      filterWhere += ` AND COALESCE(pv.sale_price, pv.price) <= $${params.length}`;
+      filterWhere += ` AND pv.price <= $${params.length}`;
     }
 
     /** 🔥 SEARCH FILTER — Only affects price calculation, not brand/color/size list */
@@ -1261,8 +1261,8 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     /** STEP-5: Price range affected by q + filters */
     const activeFiltersSQL = `
       SELECT
-          MIN(COALESCE(pv.sale_price, pv.price)) AS min_price,
-          MAX(COALESCE(pv.sale_price, pv.price)) AS max_price
+          MIN(pv.price) AS min_price,
+          MAX(pv.price) AS max_price
       FROM products p
       INNER JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
       LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
@@ -1608,8 +1608,8 @@ module.exports.updateProductPrice = catchAsync(async (req, res, next) => {
       return next(new AppError("Valid varient_id is required", 400));
     if (!price || isNaN(price) || price <= 0)
       return next(new AppError("Valid price is required", 400));
-    if (!type || !["mrp", "sale_price"].includes(type))
-      return next(new AppError("Type must be 'mrp' or 'sale_price'", 400));
+    if (!type || !["mrp", "price"].includes(type))
+      return next(new AppError("Type must be 'mrp' or 'price'", 400));
 
     const updatedProduct = await ProductService.updateProductPrice(
       product_id,
@@ -1970,7 +1970,7 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
         p.gender,
         p.attributes->>'color' AS color,
         (
-          SELECT MIN(COALESCE(v.sale_price, v.price))
+          SELECT MIN(v.price)
           FROM product_variants v
           WHERE v.product_id = p.id
             AND v.is_active = TRUE
@@ -1994,7 +1994,7 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
       WITH candidate_prices AS (
         SELECT
           pv.product_id,
-          MIN(COALESCE(pv.sale_price, pv.price)) AS min_price
+          MIN(pv.price) AS min_price
         FROM product_variants pv
         WHERE pv.deleted_at IS NULL
           AND pv.is_active = TRUE
@@ -2016,6 +2016,12 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
       WHERE p.id <> b.id
         AND p.deleted_at IS NULL
         AND p.is_active = TRUE
+        AND (p.vendor_id IS NULL OR EXISTS (
+          SELECT 1 FROM vendors v
+          WHERE v.id = p.vendor_id
+            AND v.status = 'active'
+            AND v.deleted_at IS NULL
+        ))
       ORDER BY
         (
           (CASE WHEN p.default_category_id = b.default_category_id THEN 3 ELSE 0 END) +

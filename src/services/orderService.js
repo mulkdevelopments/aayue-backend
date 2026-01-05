@@ -39,6 +39,11 @@ const OrderService = {
       vendor_id = null,
       coupon_id = null,
       coupon_code = null,
+      discount = 0,
+      currency = "EUR",
+      exchange_rate = 1,
+      base_currency = "EUR",
+      currency_symbol = "€",
     },
     client
   ) {
@@ -65,9 +70,10 @@ const OrderService = {
     const insertOrderSQL = `
     INSERT INTO orders (
       id, order_no, user_id, vendor_id, total_amount,
-      payment_status, order_status, shipping_address, billing_address, created_at, coupon_id, coupon_code
+      payment_status, order_status, shipping_address, billing_address, created_at, coupon_id, coupon_code,
+      discount, currency, exchange_rate, base_currency, currency_symbol
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb, now(), $10, $11)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb, now(), $10, $11, $12, $13, $14, $15, $16)
     RETURNING *
   `;
 
@@ -83,6 +89,11 @@ const OrderService = {
       JSON.stringify(billing_address || shipping_address),
       coupon_id,
       coupon_code,
+      Number(discount) || 0,
+      currency,
+      exchange_rate,
+      base_currency,
+      currency_symbol,
     ];
 
     const { rows: orderRows } = await client.query(
@@ -145,39 +156,40 @@ const OrderService = {
     if (currentPaymentStatus === "paid") {
       return { alreadyPaid: true };
     }
-
+// ------------------------------------------------------------------------------------------------------------------
+    // ⚠️ STOCK REDUCTION COMMENTED OUT - Re-enable when inventory management is ready
     // lock each variant and decrement stock
-    for (const it of items) {
-      if (!it.variant_id) continue;
-      const vRes = await client.query(
-        `SELECT stock FROM product_variants WHERE id = $1 FOR UPDATE`,
-        [it.variant_id]
-      );
-      if (vRes.rowCount === 0) {
-        // missing variant -> log but continue
-        continue;
-      }
-      const currentStock = Number(vRes.rows[0].stock || 0);
-      const newStock = currentStock - Number(it.qty || 0);
-      await client.query(
-        `UPDATE product_variants SET stock = $1 WHERE id = $2`,
-        [newStock < 0 ? 0 : newStock, it.variant_id]
-      );
+    // for (const it of items) {
+    //   if (!it.variant_id) continue;
+    //   const vRes = await client.query(
+    //     `SELECT stock FROM product_variants WHERE id = $1 FOR UPDATE`,
+    //     [it.variant_id]
+    //   );
+    //   if (vRes.rowCount === 0) {
+    //     // missing variant -> log but continue
+    //     continue;
+    //   }
+    //   const currentStock = Number(vRes.rows[0].stock || 0);
+    //   const newStock = currentStock - Number(it.qty || 0);
+    //   await client.query(
+    //     `UPDATE product_variants SET stock = $1 WHERE id = $2`,
+    //     [newStock < 0 ? 0 : newStock, it.variant_id]
+    //   );
 
-      // optional: write inventory transaction
-      await client.query(
-        `INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
-         VALUES ($1,$2,$3,$4,$5, now())`,
-        [
-          uuidv4(),
-          it.variant_id,
-          -Math.abs(it.qty || 0),
-          "order_paid",
-          order_id,
-        ]
-      );
-    }
-
+    //   // optional: write inventory transaction
+    //   await client.query(
+    //     `INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
+    //      VALUES ($1,$2,$3,$4,$5, now())`,
+    //     [
+    //       uuidv4(),
+    //       it.variant_id,
+    //       -Math.abs(it.qty || 0),
+    //       "order_paid",
+    //       order_id,
+    //     ]
+    //   );
+    // }
+// ------------------------------------------------------------------------------------------------------------------
     // update orders
     await client.query(
       `UPDATE orders SET payment_status='paid', order_status='processing', deleted_at = NULL  WHERE id = $1`,
@@ -205,8 +217,8 @@ const OrderService = {
     const params = [user_id];
     let idx = 2;
 
-    // payment status filter (exact match)
-    if (status) {
+    // payment status filter (exact match) - skip if status is 'all'
+    if (status && status.toLowerCase() !== 'all') {
       where.push(`o.payment_status = $${idx}`);
       params.push(status);
       idx++;
@@ -243,6 +255,9 @@ const OrderService = {
       o.order_no,
       o.user_id,
       o.vendor_id,
+      o.currency,
+      o.exchange_rate,
+      o.currency_symbol,
       o.total_amount,
       o.payment_status,
       o.order_status,
@@ -267,7 +282,7 @@ const OrderService = {
               'id', pv.id,
               'sku', pv.sku,
               'price', pv.price,
-              'sale_price', pv.sale_price,
+              'mrp', pv.mrp,
               'stock', pv.stock,
               'images', pv.images
             )
@@ -293,6 +308,11 @@ const OrderService = {
       order_no: r.order_no,
       user_id: r.user_id,
       vendor_id: r.vendor_id,
+
+      currency: r.currency,
+      exchange_rate: r.exchange_rate !== null ? Number(r.exchange_rate) : null,
+      currency_symbol: r.currency_symbol,
+
       total_amount: r.total_amount !== null ? Number(r.total_amount) : null,
       payment_status: r.payment_status,
       order_status: r.order_status,
@@ -401,7 +421,7 @@ const OrderService = {
               'id', pv.id,
               'sku', pv.sku,
               'price', pv.price,
-              'sale_price', pv.sale_price,
+              'mrp', pv.mrp,
               'stock', pv.stock,
               'images', pv.images
             )
@@ -431,6 +451,13 @@ const OrderService = {
       order_no: r.order_no,
       user_id: r.user_id,
       vendor_id: r.vendor_id,
+
+      coupon_code: r.coupon_code,
+      discount: r.discount !== null ? Number(r.discount) : 0,
+      currency: r.currency,
+      exchange_rate: r.exchange_rate !== null ? Number(r.exchange_rate) : null,
+      currency_symbol: r.currency_symbol,
+
       total_amount: r.total_amount !== null ? Number(r.total_amount) : null,
       payment_status: r.payment_status,
       order_status: r.order_status,

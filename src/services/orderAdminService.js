@@ -81,7 +81,8 @@ const OrderAdminService = {
     const mainSql = `
       SELECT
         o.id, o.order_no, o.user_id, o.vendor_id, o.total_amount, o.payment_status, o.order_status,
-        o.shipping_address, o.billing_address, o.created_at, 
+        o.shipping_address, o.billing_address, o.created_at, o.coupon_code, o.coupon_id, o.discount,
+        o.currency, o.exchange_rate, o.base_currency, o.currency_symbol, 
         COALESCE(jsonb_agg(
           DISTINCT jsonb_build_object(
             'id', oi.id,
@@ -90,7 +91,7 @@ const OrderAdminService = {
             'price', oi.price,
             'vendor_id', oi.vendor_id,
             'product', jsonb_build_object('id', p.id, 'name', p.name, 'product_sku', p.product_sku, 'product_img', p.product_img),
-            'variant', jsonb_build_object('id', pv.id, 'sku', pv.sku, 'price', pv.price, 'sale_price', pv.sale_price, 'stock', pv.stock, 'images', pv.images)
+            'variant', jsonb_build_object('id', pv.id, 'sku', pv.sku, 'price', pv.price, 'mrp', pv.mrp, 'stock', pv.stock, 'images', pv.images)
           )
         ) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
       FROM orders o
@@ -117,6 +118,13 @@ const OrderAdminService = {
       shipping_address: r.shipping_address,
       billing_address: r.billing_address,
       created_at: r.created_at,
+      coupon_code: r.coupon_code,
+      coupon_id: r.coupon_id,
+      discount: r.discount !== null ? Number(r.discount) : null,
+      currency: r.currency,
+      exchange_rate: r.exchange_rate !== null ? Number(r.exchange_rate) : null,
+      base_currency: r.base_currency,
+      currency_symbol: r.currency_symbol,
       items: (r.items || []).map((it) => ({
         id: it.id,
         variant_id: it.variant_id,
@@ -235,7 +243,8 @@ const OrderAdminService = {
     const mainSql = `
     SELECT
       o.id, o.order_no, o.user_id, o.vendor_id, o.total_amount, o.payment_status, o.order_status,
-      o.shipping_address, o.billing_address, o.created_at,
+      o.shipping_address, o.billing_address, o.created_at, o.coupon_code, o.coupon_id, o.discount,
+      o.currency, o.exchange_rate, o.base_currency, o.currency_symbol,
       COALESCE(jsonb_agg(
         DISTINCT jsonb_build_object(
           'id', oi.id,
@@ -253,7 +262,7 @@ const OrderAdminService = {
             'id', pv.id,
             'sku', pv.sku,
             'price', pv.price,
-            'sale_price', pv.sale_price,
+            'mrp', pv.mrp,
             'stock', pv.stock,
             'images', pv.images
           )
@@ -283,6 +292,13 @@ const OrderAdminService = {
       shipping_address: r.shipping_address,
       billing_address: r.billing_address,
       created_at: r.created_at,
+      coupon_code: r.coupon_code,
+      coupon_id: r.coupon_id,
+      discount: r.discount !== null ? Number(r.discount) : null,
+      currency: r.currency,
+      exchange_rate: r.exchange_rate !== null ? Number(r.exchange_rate) : null,
+      base_currency: r.base_currency,
+      currency_symbol: r.currency_symbol,
       items: (r.items || []).map((it) => ({
         id: it.id,
         variant_id: it.variant_id,
@@ -312,7 +328,7 @@ const OrderAdminService = {
             'price', oi.price,
             'vendor_id', oi.vendor_id,
             'product', jsonb_build_object('id', p.id, 'name', p.name, 'product_sku', p.product_sku, 'product_img', p.product_img),
-            'variant', jsonb_build_object('id', pv.id, 'sku', pv.sku, 'price', pv.price, 'sale_price', pv.sale_price, 'stock', pv.stock, 'images', pv.images)
+            'variant', jsonb_build_object('id', pv.id, 'sku', pv.sku, 'price', pv.price, 'mrp', pv.mrp, 'stock', pv.stock, 'images', pv.images)
           )
         ) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
       FROM orders o
@@ -493,10 +509,9 @@ SELECT
           'id', pv.id,
           'sku', pv.sku,
           'price', pv.price,
-          'sale_price', pv.sale_price,
+          'mrp', pv.mrp,
           'stock', pv.stock,
           'images', pv.images,
-          'mrp', pv.mrp,
           'vendorsaleprice', pv.vendorsaleprice,
           'vendormrp', pv.vendormrp
         ),
@@ -604,6 +619,8 @@ LIMIT 1;
       user_id: r.user_id,
       invoice_pdf_path: r?.invoice_pdf_path,
       coupon_code: r?.coupon_code,
+      coupon_id: r?.coupon_id,
+      discount: r.discount !== null ? Number(r.discount) : null,
       total_amount: r.total_amount !== null ? Number(r.total_amount) : null,
       payment_status: r.payment_status,
       order_status: r.order_status,
@@ -611,6 +628,10 @@ LIMIT 1;
       billing_address: r.billing_address,
       created_at: r.created_at,
       updated_at: r.updated_at,
+      currency: r.currency,
+      exchange_rate: r.exchange_rate !== null ? Number(r.exchange_rate) : null,
+      base_currency: r.base_currency,
+      currency_symbol: r.currency_symbol,
       user: r.user || null,
       payment: r.payment || null,
       items: (r.items || []).map((it) => ({

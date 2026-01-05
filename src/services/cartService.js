@@ -59,10 +59,10 @@ const CartService = {
     );
     const discount_percent = Number(discRes.rows[0].discount_percent || 0);
 
-    // compute sale_price (rounded to 2 decimals)
-    const sale_price = +(
-      Number(pv.sale_price) -
-      (Number(pv.sale_price) * discount_percent) / 100
+    // compute final price after discount (rounded to 2 decimals)
+    const final_price = +(
+      Number(pv.price) -
+      (Number(pv.price) * discount_percent) / 100
     ).toFixed(2);
 
     // get/create cart
@@ -80,14 +80,14 @@ const CartService = {
 
       await client.query(
         `UPDATE cart_items SET qty = $1, price = $2 WHERE id = $3`,
-        [newQty, sale_price, existing.rows[0].id]
+        [newQty, final_price, existing.rows[0].id]
       );
     } else {
       // insert
       await client.query(
         `INSERT INTO cart_items (id, cart_id, variant_id, qty, price, created_at)
          VALUES ($1,$2,$3,$4,$5, now())`,
-        [uuidv4(), cart.id, variant_id, qty, sale_price]
+        [uuidv4(), cart.id, variant_id, qty, final_price]
       );
     }
 
@@ -136,24 +136,21 @@ const CartService = {
         [it.product_id]
       );
       const discount_percent = Number(discRes.rows[0].discount_percent || 0);
-      const sale_price = +(Number(it.price)
-        ? Number(it.price)
-        : Number(it.price)); // fallback; we'll compute from variant.price below
 
-      // better compute using variant price:
+      // compute final price from variant price
       const variantRes = await client.query(
         `SELECT price FROM product_variants WHERE id=$1`,
         [it.variant_id]
       );
       const variantPrice = variantRes.rows[0].price;
-      const newSalePrice = +(
+      const final_price = +(
         Number(variantPrice) -
         (Number(variantPrice) * discount_percent) / 100
       ).toFixed(2);
 
       await client.query(
         `UPDATE cart_items SET qty=$1, price=$2 WHERE id = $3`,
-        [qty, newSalePrice, item_id]
+        [qty, final_price, item_id]
       );
     }
 
@@ -195,7 +192,7 @@ const CartService = {
 
     const cart = await this.getOrCreateCartForUser(user_id, client);
 
-    // ITEMS QUERY WITH sale_price AS BASE PRICE (pv.sale_price)
+    // ITEMS QUERY WITH price AS BASE PRICE (pv.price)
     const itemsSql = `
     SELECT
       ci.id AS cart_item_id,
@@ -204,7 +201,7 @@ const CartService = {
 
       pv.id AS variant_id,
       pv.sku,
-      pv.sale_price AS variant_price,      -- ✔ BASE PRICE REPLACED
+      pv.price AS variant_price,      -- ✔ BASE PRICE (our selling price)
       pv.mrp,
       pv.stock,
       pv.images,
@@ -220,16 +217,16 @@ const CartService = {
 
       COALESCE(smax.discount_percent, 0)::numeric AS discount_percent,
 
-      -- ✔ DISCOUNT APPLIED ON pv.sale_price
+      -- ✔ DISCOUNT APPLIED ON pv.price
       ROUND(
-        (pv.sale_price * (1 - (COALESCE(smax.discount_percent,0) / 100)))::numeric,
+        (pv.price * (1 - (COALESCE(smax.discount_percent,0) / 100)))::numeric,
         2
       ) AS sale_price,
 
       -- ✔ LINE TOTAL FROM UPDATED sale_price
       ROUND(
         (
-          ROUND((pv.sale_price * (1 - (COALESCE(smax.discount_percent,0) / 100)))::numeric, 2)
+          ROUND((pv.price * (1 - (COALESCE(smax.discount_percent,0) / 100)))::numeric, 2)
           * ci.qty
         )::numeric,
         2
@@ -265,7 +262,7 @@ const CartService = {
     let total_items = 0;
 
     for (const it of items) {
-      const basePrice = Number(it.variant_price); // pv.sale_price
+      const basePrice = Number(it.variant_price); // pv.price (our selling price)
       const finalSale = Number(it.sale_price);
 
       subtotal += basePrice * Number(it.qty);
@@ -301,7 +298,7 @@ const CartService = {
 
         qty: Number(it.qty),
 
-        variant_price: Number(it.variant_price),  // ✔ now pv.sale_price
+        variant_price: Number(it.variant_price),  // ✔ now pv.price (our selling price)
         sale_price: Number(it.sale_price),
         discount_percent: Number(it.discount_percent),
 
@@ -504,7 +501,7 @@ const CartService = {
 
       // Validate variant
       const variantRes = await client.query(
-        `SELECT pv.id, pv.stock, pv.price, pv.product_id, pv.sale_price, pv.mrp
+        `SELECT pv.id, pv.stock, pv.price, pv.product_id, pv.mrp
        FROM product_variants pv
        JOIN products p ON p.id = pv.product_id
        WHERE pv.id = $1 AND pv.deleted_at IS NULL AND p.deleted_at IS NULL
@@ -541,19 +538,19 @@ const CartService = {
       const discount_percent = Number(discRes.rows[0].discount_percent || 0);
 
       // -------------------------
-      // Correct Sale Price Logic
+      // Correct Final Price Logic
       // -------------------------
-      let sale_price;
+      let final_price;
 
       if (discount_percent > 0) {
-        sale_price = +(
-          pv.sale_price * (1 - discount_percent / 100)
+        final_price = +(
+          pv.price * (1 - discount_percent / 100)
         ).toFixed(2);
       } else {
-        sale_price = pv.sale_price; // use original sale_price
+        final_price = pv.price; // use original price
       }
 
-      console.log({ discount_percent, original_sale: pv.sale_price, sale_price });
+      console.log({ discount_percent, original_price: pv.price, final_price });
 
       if (existing.rowCount) {
         // update quantity (sum)
@@ -565,14 +562,14 @@ const CartService = {
           `UPDATE cart_items
          SET qty = $1, price = $2
          WHERE id = $3`,
-          [newQty, sale_price, existing.rows[0].id]
+          [newQty, final_price, existing.rows[0].id]
         );
       } else {
         // insert new item
         await client.query(
           `INSERT INTO cart_items (id, cart_id, variant_id, qty, price, created_at)
          VALUES ($1, $2, $3, $4, $5, NOW())`,
-          [uuidv4(), cart.id, variant_id, qty, sale_price]
+          [uuidv4(), cart.id, variant_id, qty, final_price]
         );
       }
     }

@@ -22,9 +22,9 @@ const WishlistService = {
 
     // 2️⃣ Fetch ALL variants of the product
     const variantQuery = `
-    SELECT 
+    SELECT
       price,
-      sale_price,
+      mrp,
       stock,
       images,
       image_urls,
@@ -49,10 +49,10 @@ const WishlistService = {
       p.product_img ||
       null;
 
-    // Min/Max price
-    let prices = variants.map((v) => Number(v.sale_price || v.price));
-    const snap_min_price = Math.min(...prices);
-    const snap_max_price = Math.max(...prices);
+    // Min/Max price (using price, not sale_price)
+    let prices = variants.map((v) => Number(v.price)).filter(p => p > 0);
+    const snap_min_price = prices.length > 0 ? Math.min(...prices) : 0;
+    const snap_max_price = prices.length > 0 ? Math.max(...prices) : 0;
 
     // In Stock → check any variant has stock > 0
     const snap_in_stock = variants.some((v) => Number(v.stock) > 0);

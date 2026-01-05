@@ -10,7 +10,7 @@ const pool = new Pool({
     password: "Developer123#",
     port: 5432,
 });
-
+ 
 async function exportVariants() {
     try {
         const client = await pool.connect();

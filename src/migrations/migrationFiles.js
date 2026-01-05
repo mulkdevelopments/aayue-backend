@@ -306,20 +306,37 @@ CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status);
   `-- Coupons
 CREATE TABLE IF NOT EXISTS coupons (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  code VARCHAR(100) UNIQUE,
-  description TEXT,
-  discount_type VARCHAR(50),
-  discount_value NUMERIC(12,2),
-  min_order_value NUMERIC(12,2),
-  valid_from TIMESTAMP WITH TIME ZONE,
-  valid_to TIMESTAMP WITH TIME ZONE,
-  usage_limit INT,
-  used_count INT DEFAULT 0,
+  code VARCHAR(100) UNIQUE NOT NULL,
+  type VARCHAR(50) NOT NULL,
+  value NUMERIC(12,2),
+  max_discount NUMERIC(12,2),
+  currency VARCHAR(10) DEFAULT 'AED',
+  scope_type VARCHAR(50) NOT NULL,
+  scope_ids JSONB,
+  min_subtotal NUMERIC(12,2) DEFAULT 0,
+  first_order_only BOOLEAN DEFAULT false,
+  allowed_user_ids JSONB,
+  excluded_product_ids JSONB,
+  start_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  end_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  channels JSONB DEFAULT '["WEB"]'::jsonb,
+  usage_limit_total INT DEFAULT 0,
+  usage_limit_per_user INT DEFAULT 0,
+  stack_group VARCHAR(100),
+  priority INT DEFAULT 0,
+  status VARCHAR(50) DEFAULT 'ACTIVE',
+  created_by UUID,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL,
+  CONSTRAINT chk_coupon_type CHECK (type IN ('PERCENT', 'FLAT', 'FREE_SHIP', 'BOGO')),
+  CONSTRAINT chk_scope_type CHECK (scope_type IN ('GLOBAL', 'PRODUCT', 'CATEGORY', 'CART')),
+  CONSTRAINT chk_status CHECK (status IN ('ACTIVE', 'PAUSED', 'EXPIRED', 'ARCHIVED'))
 );
 CREATE INDEX IF NOT EXISTS idx_coupons_code ON coupons(code);
-CREATE INDEX IF NOT EXISTS idx_coupons_validity ON coupons(valid_from, valid_to);
+CREATE INDEX IF NOT EXISTS idx_coupons_validity ON coupons(start_at, end_at);
+CREATE INDEX IF NOT EXISTS idx_coupons_status ON coupons(status);
+CREATE INDEX IF NOT EXISTS idx_coupons_type ON coupons(type);
 `,
 
   `-- Wallets & wallet_transactions
@@ -493,6 +510,119 @@ WHERE NOT EXISTS (SELECT 1 FROM home_sections s WHERE s.key = v.k);
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
   deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
 );
+`,
+
+  `-- Home banners table for managing homepage banners
+CREATE TABLE IF NOT EXISTS home_banners (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slot VARCHAR(100) NOT NULL UNIQUE,        -- 'top-banner', 'below-top-banner', 'middle-banner', 'bottom-top-banner', 'bottom-left-banner'
+  media_type VARCHAR(50),                   -- 'image' | 'video'
+  media_url TEXT,                           -- URL to the media file
+  title VARCHAR(255),                       -- Optional title text
+  subtitle TEXT,                            -- Optional subtitle
+  button_text VARCHAR(100),                 -- Optional button text
+  link_url TEXT,                            -- Optional navigation URL
+  is_active BOOLEAN DEFAULT true,
+  sort_order INT DEFAULT 0,                 -- For ordering banners
+  metadata JSONB,                           -- Additional flexible data
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_home_banners_slot ON home_banners(slot);
+CREATE INDEX IF NOT EXISTS idx_home_banners_is_active ON home_banners(is_active);
+CREATE INDEX IF NOT EXISTS idx_home_banners_sort_order ON home_banners(sort_order);
+`,
+
+  `-- Overlay grid table for homepage overlay items
+CREATE TABLE IF NOT EXISTS overlaygrid (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(255),
+  mrp NUMERIC(12,2),
+  sale_price NUMERIC(12,2),
+  product_image TEXT,
+  product_redirect_url TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+`,
+
+  `-- Sale by category table for category-based sales/promotions
+CREATE TABLE IF NOT EXISTS sale_by_category (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  image_url TEXT,
+  redirect_url TEXT,
+  title VARCHAR(255),
+  button_text VARCHAR(100),
+  created_by UUID NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sale_by_category_created_at ON sale_by_category(created_at DESC);
+`,
+
+  `-- Multi-currency support: Exchange rates table
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS currency_exchange_rates (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  from_currency TEXT NOT NULL DEFAULT 'EUR',
+  to_currency TEXT NOT NULL,
+  rate DECIMAL(10, 4) NOT NULL,
+  updated_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE(from_currency, to_currency)
+);
+
+CREATE INDEX IF NOT EXISTS idx_currency_rates_lookup ON currency_exchange_rates(from_currency, to_currency);
+
+COMMENT ON TABLE currency_exchange_rates IS 'Real-time currency exchange rates (EUR to other currencies). Updated every 6 hours by cron job.';
+
+-- Insert initial exchange rates
+INSERT INTO currency_exchange_rates (to_currency, rate, updated_at) VALUES
+  ('AED', 4.0, NOW()),
+  ('INR', 90.0, NOW()),
+  ('PKR', 305.0, NOW())
+ON CONFLICT (from_currency, to_currency) DO NOTHING;
+`,
+
+  `-- Multi-currency support: Add markup_percent to product_variants
+ALTER TABLE product_variants
+ADD COLUMN IF NOT EXISTS markup_percent DECIMAL(5, 2);
+
+COMMENT ON COLUMN product_variants.markup_percent IS 'Product-specific markup percentage applied on vendor EUR price (default 20%). Editable by admin.';
+
+-- Calculate markup from existing data (runs only if markup_percent is NULL)
+UPDATE product_variants
+SET markup_percent = CASE
+  WHEN vendorsaleprice IS NOT NULL
+    AND vendorsaleprice > 0
+    AND sale_price IS NOT NULL
+    AND sale_price > 0
+    AND sale_price > vendorsaleprice
+  THEN ROUND(((sale_price / vendorsaleprice) - 1) * 100, 2)
+  ELSE 20.0
+END
+WHERE markup_percent IS NULL;
+`,
+
+  `-- Multi-currency support: Add additional fields to product_variants
+ALTER TABLE product_variants
+ADD COLUMN IF NOT EXISTS vendor_id UUID REFERENCES vendors(id),
+ADD COLUMN IF NOT EXISTS currency VARCHAR(10),
+ADD COLUMN IF NOT EXISTS conversion_rate DECIMAL(10, 4),
+ADD COLUMN IF NOT EXISTS vmrp_to_aed VARCHAR(50),
+ADD COLUMN IF NOT EXISTS vsale_to_aed VARCHAR(50),
+ADD COLUMN IF NOT EXISTS normalized_size VARCHAR(128),
+ADD COLUMN IF NOT EXISTS normalized_color VARCHAR(128),
+ADD COLUMN IF NOT EXISTS size_type VARCHAR(50);
+
+CREATE INDEX IF NOT EXISTS idx_variants_vendor_id ON product_variants(vendor_id);
+CREATE INDEX IF NOT EXISTS idx_variants_normalized_size ON product_variants(normalized_size);
+CREATE INDEX IF NOT EXISTS idx_variants_normalized_color ON product_variants(normalized_color);
 `
 ];
 

@@ -198,14 +198,30 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
     const user_id = req.user?.id;
     if (!user_id) return next(new AppError("Unauthorized", 401));
 
-    const {
+    let {
       mode = "cart",
       variant_id,
       qty = 1,
       shipping_address_id,
       couponId,
       couponCode,
+      selectedCurrency = "EUR",
+      exchangeRate = 1,
+      currencySymbol = "€",
     } = req.body;
+
+    // PKR is not supported by Stripe - fallback to EUR for payment processing
+    // User still sees PKR prices on frontend, but payment is processed in EUR
+    const displayCurrency = selectedCurrency;
+    const displayCurrencySymbol = currencySymbol;
+    const displayExchangeRate = exchangeRate;
+
+    if (selectedCurrency === "PKR") {
+      console.log("⚠️ PKR currency detected - processing payment in EUR");
+      selectedCurrency = "EUR";
+      exchangeRate = 1;
+      currencySymbol = "€";
+    }
 
     if (!shipping_address_id) {
       return next(new AppError("shipping_address_id is required", 400));
@@ -313,7 +329,8 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
 
     await client.query("BEGIN");
 
-    // ✅ create order
+    // ✅ create order with currency information
+    // Store display currency (what user sees) and payment currency (what Stripe processes)
     const order = await OrderService.createOrderFromItems(
       {
         user_id,
@@ -323,19 +340,26 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
         vendor_id: items[0]?.vendorId || null,
         coupon_id: appliedCouponId || null,
         coupon_code: appliedCouponCode || null,
+        discount: discountToApply, // Discount amount applied (in EUR)
+        currency: displayCurrency, // What user selected (EUR/AED/INR/PKR)
+        exchange_rate: displayExchangeRate, // Exchange rate for display currency
+        base_currency: "EUR",
+        currency_symbol: displayCurrencySymbol,
       },
       client
     );
 
-    // Build Stripe line_items
-    const centsDiscount = Math.round(discountToApply * 100);
+    // Build Stripe line_items with currency conversion
+    // Note: Prices in DB are in EUR, we convert to selected currency
+    const centsDiscount = Math.round(discountToApply * exchangeRate * 100);
     const itemLineCents = items.map((it) => {
-      const unit =
+      const eurUnit =
         it.sale_price !== undefined && it.sale_price !== null
           ? Number(it.sale_price)
           : Number(it.price || 0);
+      const convertedUnit = eurUnit * exchangeRate;
       const qty = Number(it.qty || 1);
-      return Math.round(unit * 100) * qty;
+      return Math.round(convertedUnit * 100) * qty;
     });
     const subtotalCents = itemLineCents.reduce((a, b) => a + b, 0);
     const subtotalAfterDiscountCents = Math.max(
@@ -367,15 +391,11 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
           Math.floor(adjustedLineTotalCents / qty)
         );
         allocatedCents += adjustedUnitCents * qty;
-        const unit =
-          it.sale_price !== undefined && it.sale_price !== null
-            ? Number(it.sale_price)
-            : Number(it.price || 0);
         const name = it.product?.name || it.name || "Product";
         const image = it.product?.product_img || it.product?.image || null;
         return {
           price_data: {
-            currency: process.env.CURRENCY || "usd",
+            currency: selectedCurrency.toLowerCase(),
             product_data: { name, images: image ? [image] : [] },
             unit_amount: adjustedUnitCents,
           },
@@ -393,7 +413,7 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
         const image = it.product?.product_img || it.product?.image || null;
         return {
           price_data: {
-            currency: process.env.CURRENCY || "usd",
+            currency: selectedCurrency.toLowerCase(),
             product_data: { name, images: image ? [image] : [] },
             unit_amount: adjustedUnitCents,
           },
@@ -404,22 +424,35 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
 
     // Optionally: if you want shipping as a stripe line item (recommended if you show shipping) add it:
     if (effectiveShippingCost > 0) {
+      const shippingInSelectedCurrency = effectiveShippingCost * exchangeRate;
       adjustedLineItems.push({
         price_data: {
-          currency: process.env.CURRENCY || "usd",
+          currency: selectedCurrency.toLowerCase(),
           product_data: { name: "Shipping" },
-          unit_amount: Math.round(effectiveShippingCost * 100),
+          unit_amount: Math.round(shippingInSelectedCurrency * 100),
         },
         quantity: 1,
       });
     }
 
     // Create Stripe session with adjustedLineItems
+    // Google Pay is already enabled in your Stripe dashboard and works automatically
+    // UPI-specific payment methods require additional setup in India
+    const paymentMethods = ["card"];
+
+    // Add additional payment methods based on currency
+    // Google Pay will automatically show for supported currencies when enabled
+
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
+      payment_method_types: paymentMethods,
       mode: "payment",
       line_items: adjustedLineItems,
-      metadata: { order_id: order.id, user_id },
+      metadata: {
+        order_id: order.id,
+        user_id,
+        currency: selectedCurrency,
+        exchange_rate: exchangeRate.toString(),
+      },
       success_url: `${process.env.FRONTEND_URL}/success-payment?order_id=${order.id}`,
       cancel_url: `${process.env.FRONTEND_URL}/checkout-cancelled`,
     });
@@ -723,7 +756,7 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
 
       const { rows } = await client.query(
         `
-  SELECT 
+  SELECT
     p.name AS name,
     p.product_img AS image,
     oi.qty,
@@ -733,6 +766,9 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
     o.payment_status,
     o.billing_address,
     o.shipping_address,
+    o.currency,
+    o.currency_symbol,
+    o.exchange_rate,
     pv.sku,
     pv.normalized_size AS size
   FROM order_items oi
@@ -750,9 +786,10 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
           to: user.email,
           orderData: {
             customerName: user.full_name,
-            id: orderItems[0]?.order_no || order_id,
+            orderId: orderItems[0]?.order_no || order_id,
             items: orderItems,
             payment_id: stripePaymentId,
+            currency: orderItems[0]?.currency_symbol || "€",
           },
         });
       }
@@ -774,7 +811,7 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
               (acc, item) => acc + item.price * item.qty,
               0
             ),
-            currency: orderItems[0]?.currency || "AED",
+            currency: orderItems[0]?.currency_symbol || "€",
           },
         });
       } catch (adminErr) {

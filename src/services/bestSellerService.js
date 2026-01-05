@@ -105,7 +105,9 @@ const BestSellerService = {
               'id', pv.id,
               'sku', pv.sku,
               'price', pv.price,
-              'sale_price', pv.sale_price,
+              'mrp', pv.mrp,
+              'vendorsaleprice', pv.vendorsaleprice,
+              'vendormrp', pv.vendormrp,
               'stock', pv.stock,
               'variant_color', pv.variant_color,
               'variant_size', pv.variant_size,
@@ -134,6 +136,12 @@ const BestSellerService = {
       AND bs.active = true
       AND (bs.start_at IS NULL OR bs.start_at <= $1)
       AND (bs.end_at IS NULL OR bs.end_at >= $1)
+      AND (p.vendor_id IS NULL OR EXISTS (
+        SELECT 1 FROM vendors v
+        WHERE v.id = p.vendor_id
+          AND v.status = 'active'
+          AND v.deleted_at IS NULL
+      ))
     ORDER BY bs.rank ASC NULLS LAST, bs.created_at DESC
     LIMIT $2 OFFSET $3
   `;

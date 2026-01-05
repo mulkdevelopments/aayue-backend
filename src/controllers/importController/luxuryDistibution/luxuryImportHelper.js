@@ -102,11 +102,31 @@ function transformRowToProduct(row) {
 
     const color = (row.color_detail || row.color_supplier || null) || null;
     const eanRaw = stripStars(row.ean);
+
+    // Vendor prices (in EUR)
+    const vendorMrp = row.original_price ? Number(row.original_price) : null;
+    const vendorSalePrice = row.selling_price ? Number(row.selling_price) : null;
+
+    // Calculate our prices: price = vendorsaleprice * 3, mrp maintains vendor discount %
+    let ourPrice = null;
+    let ourMrp = null;
+
+    if (vendorSalePrice && vendorSalePrice > 0) {
+        ourPrice = Number((vendorSalePrice * 3).toFixed(2));
+
+        if (vendorMrp && vendorMrp > vendorSalePrice) {
+            const vendorDiscount = (vendorMrp - vendorSalePrice) / vendorMrp;
+            ourMrp = Number((ourPrice / (1 - vendorDiscount)).toFixed(2));
+        } else {
+            ourMrp = ourPrice;
+        }
+    }
+
     const basePrices = {
-        mrp: row.original_price ? Number(row.original_price) : null,
-        sale_price: row.selling_price ? Number(row.selling_price) : null,
-        ourmrp: row.original_price ? Number(row.original_price) : null,
-        oursaleprice: row.selling_price ? Number(row.selling_price) : null,
+        vendormrp: vendorMrp,
+        vendorsaleprice: vendorSalePrice,
+        price: ourPrice,
+        mrp: ourMrp,
         cost: row.cost ? Number(row.cost) : null,
     };
     if (Array.isArray(sizeQuantities) && sizeQuantities.length) {
@@ -122,11 +142,10 @@ function transformRowToProduct(row) {
                 sku: vSku,
                 vendor_product_id: supplierProductId || null,
                 stock: qtyVal,
+                vendormrp: basePrices.vendormrp,
+                vendorsaleprice: basePrices.vendorsaleprice,
+                price: basePrices.price,
                 mrp: basePrices.mrp,
-                sale_price: basePrices.sale_price,
-                ourmrp: basePrices.ourmrp,
-                oursaleprice: basePrices.oursaleprice,
-                price: basePrices.sale_price ?? basePrices.mrp,
                 attributes: {
                     ean: eanRaw || null,
                     brand_model_number: row.brand_model_number || null,
@@ -154,11 +173,10 @@ function transformRowToProduct(row) {
             sku: productSku || null,
             vendor_product_id: supplierProductId || null,
             stock: qty,
+            vendormrp: basePrices.vendormrp,
+            vendorsaleprice: basePrices.vendorsaleprice,
+            price: basePrices.price,
             mrp: basePrices.mrp,
-            sale_price: basePrices.sale_price,
-            ourmrp: basePrices.ourmrp,
-            oursaleprice: basePrices.oursaleprice,
-            price: basePrices.sale_price ?? basePrices.mrp,
             attributes: {
                 ean: eanRaw || null,
                 brand_model_number: row.brand_model_number || null,

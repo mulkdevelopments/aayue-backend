@@ -221,16 +221,17 @@ async function upsertProductAndVariant(client, transformed) {
                     `
           UPDATE product_variants SET
             vendor_id=$1,
-            price=$2, mrp=$3, sale_price=$4, stock=$5, weight=$6,
-            attributes=$7, images=$8, updated_at=now(),
-            variant_color=$9, variant_size=$10, country_of_origin=$11, is_active=$12
-          WHERE id=$13
+            vendormrp=$2, vendorsaleprice=$3, price=$4, mrp=$5, stock=$6, weight=$7,
+            attributes=$8, images=$9, updated_at=now(),
+            variant_color=$10, variant_size=$11, country_of_origin=$12, is_active=$13
+          WHERE id=$14
           `,
                     [
                         VENDOR_ID,
+                        v.vendormrp || null,
+                        v.vendorsaleprice || null,
                         v.price || null,
                         v.mrp || null,
-                        v.sale_price || null,
                         v.stock || 0,
                         v.weight || null,
                         helpers.toJsonb(v.attributes || null),
@@ -248,58 +249,55 @@ async function upsertProductAndVariant(client, transformed) {
                 const variantInsertText = `
           INSERT INTO product_variants (
             id, vendor_id, product_id, sku, barcode, vendor_product_id, productpartnersku,
-            price, mrp, sale_price, stock, weight, dimension, length, width, height,
+            price, mrp, stock, weight, dimension, length, width, height,
             attributes, images, image_urls, video1, video2, vendormrp, vendorsaleprice,
-            ourmrp, oursaleprice, tax, tax1, tax2, tax3, variant_color, variant_size,
-            country_of_origin, is_active,normalized_size,normalized_color, created_at, updated_at
+            tax, tax1, tax2, tax3, variant_color, variant_size,
+            country_of_origin, is_active, normalized_size, normalized_color, created_at, updated_at
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,
-            $8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,
-            $17::jsonb,$18::jsonb,$19::jsonb,$20,$21,$22,$23,
-            $24,$25,$26::jsonb,$27,$28,$29,$30,$31,
-            $32,$33,$34,$35, now(), now()
+            $8,$9,$10,$11,$12::jsonb,$13,$14,$15,
+            $16::jsonb,$17::jsonb,$18::jsonb,$19,$20,$21,$22,
+            $23::jsonb,$24,$25,$26,$27,$28,
+            $29,$30,$31,$32, now(), now()
           ) RETURNING id
         `;
 
                 const variantVals = [
-                    variantId,
-                    VENDOR_ID,
-                    productId,
-                    v.sku,
-                    v.barcode || null,
-                    v.vendor_product_id || null,
-                    null,
-                    v.price || null,
-                    v.mrp || null,
-                    v.sale_price || null,
-                    v.stock || 0,
-                    v.weight || null,
-                    helpers.toJsonb(v.dimension || null),
-                    v.length || null,
-                    v.width || null,
-                    v.height || null,
-                    helpers.toJsonb(v.attributes || null),
-                    helpers.toJsonb(v.images || null),
-                    null,
-                    v.video1 || null,
-                    v.video2 || null,
-                    v.vendormrp || null,
-                    v.vendorsaleprice || null,
-                    v.ourmrp || null,
-                    v.oursaleprice || null,
-                    helpers.toJsonb(v.tax || null),
-                    v.tax1 || null,
-                    v.tax2 || null,
-                    v.tax3 || null,
-                    v.variant_color || null,
-                    v.variant_size || null,
-                    v.country_of_origin || null,
-                    v.is_active !== undefined ? v.is_active : true,
-                    v.normalized_size || null,
-                    v.normalized_color || null,
+                    variantId, // $1
+                    VENDOR_ID, // $2
+                    productId, // $3
+                    v.sku, // $4
+                    v.barcode || null, // $5
+                    v.vendor_product_id || null, // $6
+                    null, // $7 productpartnersku
+                    v.price || null, // $8
+                    v.mrp || null, // $9
+                    v.stock || 0, // $10
+                    v.weight || null, // $11
+                    helpers.toJsonb(v.dimension || null), // $12
+                    v.length || null, // $13
+                    v.width || null, // $14
+                    v.height || null, // $15
+                    helpers.toJsonb(v.attributes || null), // $16
+                    helpers.toJsonb(v.images || null), // $17
+                    null, // $18 image_urls
+                    v.video1 || null, // $19
+                    v.video2 || null, // $20
+                    v.vendormrp || null, // $21
+                    v.vendorsaleprice || null, // $22
+                    helpers.toJsonb(v.tax || null), // $23
+                    v.tax1 || null, // $24
+                    v.tax2 || null, // $25
+                    v.tax3 || null, // $26
+                    v.variant_color || null, // $27
+                    v.variant_size || null, // $28
+                    v.country_of_origin || null, // $29
+                    v.is_active !== undefined ? v.is_active : true, // $30
+                    v.normalized_size || null, // $31
+                    v.normalized_color || null, // $32
                 ];
 
-                if (variantVals.length !== 35) {
+                if (variantVals.length !== 32) {
                     throw new Error(`variantVals length mismatch: ${variantVals.length}`);
                 }
 

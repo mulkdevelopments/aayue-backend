@@ -24,7 +24,7 @@ const transporter = nodemailer.createTransport({
 });
 
 const sendOrderConfirmation = async (to, orderData) => {
-  const { customerName, id: orderId, items, payment_id } = orderData;
+  const { customerName, orderId, items, payment_id } = orderData;
 
   const html = generateOrderConfirmationEmail({
     customerName,
@@ -33,7 +33,7 @@ const sendOrderConfirmation = async (to, orderData) => {
   });
 
   const mailOptions = {
-    from: `"Your Store" <${process.env.SMTP_USER}>`,
+    from: `"${process.env.EMAIL_SENDER_NAME || 'Aayeu'}" <${process.env.EMAIL_FROM || 'no-reply@aayeu.com'}>`,
     to,
     subject: `Order Confirmation - #${orderId}`,
     html,
@@ -57,7 +57,7 @@ async function sendInvoiceAttachmentEmail({
   textBody = null,
   htmlBody = null,
   maxRetries = 3,
-  from = process.env.FROM_EMAIL || process.env.SMTP_USER,
+  from = process.env.EMAIL_FROM || process.env.SMTP_USER,
 }) {
   if (!to) throw new Error("Recipient email (to) is required.");
   if (!pdfFullPath) throw new Error("pdfFullPath is required.");
@@ -165,9 +165,9 @@ const sendOrderStatusEmail = async (to, orderData) => {
     status,
   });
   const mailOptions = {
-    from: `"Your Store" <${process.env.SMTP_USER}>`,
+    from: `"${process.env.EMAIL_SENDER_NAME || 'Aayeu'}" <${process.env.EMAIL_FROM || 'no-reply@aayeu.com'}>`,
     to,
-    subject: `Order Confirmation - #${orderId}`,
+    subject: `Order Status Update - #${orderId}`,
     html,
   };
 
@@ -181,7 +181,8 @@ const sendNewOrderNotificationEmail = async (toList, orderData) => {
     orderId,
     items,
     total,
-    currency = "AED",
+    currency = "EUR",
+    currencySymbol = "€",
     customerEmail,
     customerPhone,
   } = orderData;
@@ -193,11 +194,11 @@ const sendNewOrderNotificationEmail = async (toList, orderData) => {
     orderId,
     items,
     total,
-    currency,
+    currency: currencySymbol || currency,
   });
 
   const mailOptions = {
-    from: `"Your Store" <${process.env.SMTP_USER}>`,
+    from: `"${process.env.EMAIL_SENDER_NAME || 'Aayeu'}" <${process.env.EMAIL_FROM || 'no-reply@aayeu.com'}>`,
     to: Array.isArray(toList) ? toList.join(",") : toList, // Convert to CSV
     subject: `🛍️ New Order Received - #${orderId}`,
     html,

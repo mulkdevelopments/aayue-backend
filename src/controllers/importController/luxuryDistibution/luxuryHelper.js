@@ -3,7 +3,19 @@ const axios = require("axios");
 require("dotenv").config({ path: "../../../../.env" });
 const { v4: uuidv4 } = require("uuid");
 
-async function getLuxuryToken() {
+// Token cache with expiry
+let cachedToken = null;
+let tokenExpiry = null;
+const TOKEN_LIFETIME_MS = 50 * 60 * 1000; // 50 minutes (token expires in 60)
+
+async function getLuxuryToken(forceRefresh = false) {
+  // Return cached token if valid
+  if (!forceRefresh && cachedToken && tokenExpiry && Date.now() < tokenExpiry) {
+    const remainingMinutes = Math.floor((tokenExpiry - Date.now()) / 60000);
+    console.log(`🔑 Using cached token (expires in ${remainingMinutes} minutes)`);
+    return cachedToken;
+  }
+
   const url = `${process.env.LUXURY_DISTRIBUTION_API_URL}/v1/token`;
 
   const headers = {
@@ -20,6 +32,7 @@ async function getLuxuryToken() {
   };
 
   try {
+    console.log("🔄 Fetching new Luxury Distribution token...");
     const response = await axios.post(url, body, { headers });
 
     const token =
@@ -31,9 +44,14 @@ async function getLuxuryToken() {
       throw new Error("Token not found in API response");
     }
 
-    console.log("🔑 Luxury Distribution Token:", token);
+    // Cache the token
+    cachedToken = token;
+    tokenExpiry = Date.now() + TOKEN_LIFETIME_MS;
+
+    console.log("✅ New token obtained successfully (valid for 50 minutes)");
     return token;
   } catch (err) {
+    console.error("❌ Failed to get Luxury token:", err.message);
     throw err;
   }
 }
@@ -47,11 +65,25 @@ const getLuxuryProduct = async (offset, limit, token) => {
     "Content-Type": "application/json",
   };
 
-  const res = await axios.get(endpoint, { headers });
-  // Destructure karlo for clean use
-  const { data, total } = res.data.data;
-
-  return { data, total };
+  try {
+    const res = await axios.get(endpoint, { headers });
+    const { data, total } = res.data.data;
+    return { data, total };
+  } catch (err) {
+    // If token expired (401), refresh and retry once
+    if (err.response?.status === 401) {
+      console.log("⚠️  Token expired during API call, refreshing...");
+      const newToken = await getLuxuryToken(true); // force refresh
+      const headers = {
+        Authorization: `Bearer ${newToken}`,
+        "Content-Type": "application/json",
+      };
+      const res = await axios.get(endpoint, { headers });
+      const { data, total } = res.data.data;
+      return { data, total, newToken }; // return new token to update in caller
+    }
+    throw err;
+  }
 };
 
 

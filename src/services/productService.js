@@ -155,19 +155,19 @@ const ProductService = {
       const variantInsertText = `
         INSERT INTO product_variants (
           id, product_id, sku, barcode, vendor_product_id, productpartnersku,
-          price, mrp, sale_price, stock, weight, dimension, length, width, height,
+          price, mrp, stock, weight, dimension, length, width, height,
           attributes, images, image_urls, video1, video2, vendormrp, vendorsaleprice,
-          ourmrp, oursaleprice, tax, tax1, tax2, tax3, variant_color, variant_size,
+          tax, tax1, tax2, tax3, variant_color, variant_size,
           country_of_origin, is_active, created_at, updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,
-          $7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,
-          $16::jsonb,$17::jsonb,$18::jsonb,$19,$20,$21,$22,
-          $23,$24,$25::jsonb,$26,$27,$28,$29,$30,$31,$32, now(), now()
+          $7,$8,$9,$10,$11::jsonb,$12,$13,$14,
+          $15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20,$21,
+          $22::jsonb,$23,$24,$25,$26,$27,$28,$29, now(), now()
         ) RETURNING *
       `;
 
-      // Note: make sure we supply 32 values matching $1..$32
+      // Note: make sure we supply 29 values matching $1..$29
       const variantValues = [
         variantId, // $1
         productId, // $2
@@ -177,36 +177,33 @@ const ProductService = {
         product.vendor_id ? v.productpartnersku || null : null, // $6
         v.price, // $7
         v.mrp || null, // $8
-        v.sale_price || null, // $9
-        v.stock || 0, // $10
-        v.weight || null, // $11
-        toJsonb(v.dimension || null), // $12 ::jsonb
-        v.length || null, // $13
-        v.width || null, // $14
-        v.height || null, // $15
-        toJsonb(v.attributes || null), // $16 ::jsonb
-        toJsonb(v.images || null), // $17 ::jsonb
-        toJsonb(v.image_urls || null), // $18 ::jsonb
-        v.video1 || null, // $19
-        v.video2 || null, // $20
-        product.vendor_id ? v.vendormrp || null : null, // $21
-        product.vendor_id ? v.vendorsaleprice || null : null, // $22
-        v.ourmrp || null, // $23
-        v.oursaleprice || null, // $24
-        toJsonb(v.tax || null), // $25 ::jsonb
-        v.tax1 || null, // $26
-        v.tax2 || null, // $27
-        v.tax3 || null, // $28
-        v.variant_color || null, // $29
-        v.variant_size || null, // $30
-        v.country_of_origin || null, // $31
-        v.is_active !== undefined ? v.is_active : true, // $32
+        v.stock || 0, // $9
+        v.weight || null, // $10
+        toJsonb(v.dimension || null), // $11 ::jsonb
+        v.length || null, // $12
+        v.width || null, // $13
+        v.height || null, // $14
+        toJsonb(v.attributes || null), // $15 ::jsonb
+        toJsonb(v.images || null), // $16 ::jsonb
+        toJsonb(v.image_urls || null), // $17 ::jsonb
+        v.video1 || null, // $18
+        v.video2 || null, // $19
+        product.vendor_id ? v.vendormrp || null : null, // $20
+        product.vendor_id ? v.vendorsaleprice || null : null, // $21
+        toJsonb(v.tax || null), // $22 ::jsonb
+        v.tax1 || null, // $23
+        v.tax2 || null, // $24
+        v.tax3 || null, // $25
+        v.variant_color || null, // $26
+        v.variant_size || null, // $27
+        v.country_of_origin || null, // $28
+        v.is_active !== undefined ? v.is_active : true, // $29
       ];
 
       // Defensive check: ensure lengths match
-      if (variantValues.length !== 32) {
+      if (variantValues.length !== 29) {
         throw new Error(
-          `Internal error: variantValues length ${variantValues.length} != 32`
+          `Internal error: variantValues length ${variantValues.length} != 29`
         );
       }
 
@@ -297,6 +294,8 @@ const ProductService = {
 
     // ---------- Build base WHERE clauses (only referencing products and EXISTS subqueries) ----------
     const whereClauses = ["p.deleted_at IS NULL"];
+    // ✅ Filter out products from inactive vendors
+    whereClauses.push(`(p.vendor_id IS NULL OR EXISTS (SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL))`);
     const params = [];
     let idx = 1;
 
@@ -360,14 +359,14 @@ const ProductService = {
     if (min_price !== null && min_price !== undefined) {
       params.push(min_price);
       whereClauses.push(
-        `EXISTS (SELECT 1 FROM product_variants pv_price WHERE pv_price.product_id = p.id AND (COALESCE(pv_price.sale_price, pv_price.price) >= $${idx}) AND pv_price.deleted_at IS NULL)`
+        `EXISTS (SELECT 1 FROM product_variants pv_price WHERE pv_price.product_id = p.id AND pv_price.price >= $${idx} AND pv_price.deleted_at IS NULL)`
       );
       idx++;
     }
     if (max_price !== null && max_price !== undefined) {
       params.push(max_price);
       whereClauses.push(
-        `EXISTS (SELECT 1 FROM product_variants pv_price2 WHERE pv_price2.product_id = p.id AND (COALESCE(pv_price2.sale_price, pv_price2.price) <= $${idx}) AND pv_price2.deleted_at IS NULL)`
+        `EXISTS (SELECT 1 FROM product_variants pv_price2 WHERE pv_price2.product_id = p.id AND pv_price2.price <= $${idx} AND pv_price2.deleted_at IS NULL)`
       );
       idx++;
     }
@@ -457,7 +456,7 @@ const ProductService = {
     let selectExtra = ""; // to fetch min_price when needed
     if (sort_by === "price") {
       selectExtra = `(
-                SELECT MIN(COALESCE(pv2.sale_price, pv2.price))
+                SELECT MIN(pv2.price)
                 FROM product_variants pv2
                 WHERE pv2.product_id = p.id AND pv2.deleted_at IS NULL
             ) AS min_price`;
@@ -490,7 +489,8 @@ const ProductService = {
                   'sku', pv.sku,
                   'price', pv.price,
                   'mrp', pv.mrp,
-                  'sale_price', pv.sale_price,
+                  'vendorsaleprice', pv.vendorsaleprice,
+                  'vendormrp', pv.vendormrp,
                   'stock', pv.stock,
                   'variant_color', pv.variant_color,
                   'variant_size', pv.variant_size,
@@ -547,7 +547,7 @@ const ProductService = {
     p.vendor_id, p.default_category_id, p.country_of_origin, p.is_active, p.created_at, p.updated_at,
 
     -- ✅ Correct pricing aggregates
-    MIN(pv.sale_price) AS min_price,                  -- lowest sale price among variants
+    MIN(pv.price) AS min_price,                       -- lowest price among variants
     MAX(pv.mrp) AS max_price,                         -- highest MRP among variants
     MIN(pv.vendorsaleprice) AS min_vendor_price,      -- lowest vendor sale price
     MAX(pv.vendormrp) AS max_vendor_price,            -- highest vendor MRP
@@ -819,18 +819,18 @@ const ProductService = {
        whereClauses.push(`
          EXISTS (
              SELECT 1 FROM product_variants pv
-             WHERE pv.product_id = p.id AND COALESCE(pv.sale_price, pv.price) >= $${idx}
+             WHERE pv.product_id = p.id AND pv.price >= $${idx}
          )
        `);
        idx++;
      }
- 
+
      if (max_price != null) {
        params.push(max_price);
        whereClauses.push(`
          EXISTS (
              SELECT 1 FROM product_variants pv
-             WHERE pv.product_id = p.id AND COALESCE(pv.sale_price, pv.price) <= $${idx}
+             WHERE pv.product_id = p.id AND pv.price <= $${idx}
          )
        `);
        idx++;
@@ -893,8 +893,8 @@ const ProductService = {
        const priceOrder = sort_by === "price_low_to_high" ? "ASC" : "DESC";
        idsSQL = `
          SELECT p.id,
-                MIN(COALESCE(pv.sale_price, pv.price)) AS min_price,
-                MAX(COALESCE(pv.sale_price, pv.price)) AS max_price
+                MIN(pv.price) AS min_price,
+                MAX(pv.price) AS max_price
          FROM products p
          LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
          ${whereSQL}
@@ -993,6 +993,8 @@ const ProductService = {
     } = options;
 
     const whereClauses = ["p.deleted_at IS NULL"];
+    // ✅ Filter out products from inactive vendors
+    whereClauses.push(`(p.vendor_id IS NULL OR EXISTS (SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL))`);
     const params = [];
     let idx = 1;
 
@@ -1146,7 +1148,7 @@ const ProductService = {
       whereClauses.push(`
         EXISTS (
             SELECT 1 FROM product_variants pv
-            WHERE pv.product_id = p.id AND COALESCE(pv.sale_price, pv.price) >= $${idx}
+            WHERE pv.product_id = p.id AND pv.price >= $${idx}
         )
       `);
       idx++;
@@ -1157,7 +1159,7 @@ const ProductService = {
       whereClauses.push(`
         EXISTS (
             SELECT 1 FROM product_variants pv
-            WHERE pv.product_id = p.id AND COALESCE(pv.sale_price, pv.price) <= $${idx}
+            WHERE pv.product_id = p.id AND pv.price <= $${idx}
         )
       `);
       idx++;
@@ -1218,8 +1220,8 @@ const ProductService = {
       const priceOrder = sort_by === "price_low_to_high" ? "ASC" : "DESC";
       idsSQL = `
         SELECT p.id,
-               MIN(COALESCE(pv.sale_price, pv.price)) AS min_price,
-               MAX(COALESCE(pv.sale_price, pv.price)) AS max_price
+               MIN(pv.price) AS min_price,
+               MAX(pv.price) AS max_price
         FROM products p
         LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
         ${whereSQL}
@@ -1449,7 +1451,7 @@ const ProductService = {
 
      -- MIN(COALESCE(pv.sale_price, pv.price)) AS min_price,
      -- MAX(COALESCE(pv.sale_price, pv.price)) AS max_price,
-     MIN(pv.sale_price) AS min_price,                  -- lowest sale price among variants
+     MIN(pv.price) AS min_price,                  -- lowest price among variants
     MAX(pv.mrp) AS max_price,  
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
@@ -1457,8 +1459,7 @@ const ProductService = {
         'sku', pv.sku,
         'mrp', pv.mrp,
         'price', pv.price,
-        'sale_price', pv.sale_price,
-        'vendor_sale_price', pv.vendorsaleprice,
+        'vendorsaleprice', pv.vendorsaleprice,
         'vendor_mrp', pv.vendormrp,
         'stock', pv.stock,
         'variant_color', pv.variant_color,
@@ -1593,7 +1594,7 @@ const ProductService = {
 
      -- MIN(COALESCE(pv.sale_price, pv.price)) AS min_price,
      -- MAX(COALESCE(pv.sale_price, pv.price)) AS max_price,
-     MIN(pv.sale_price) AS min_price,                  -- lowest sale price among variants
+     MIN(pv.price) AS min_price,                  -- lowest price among variants
     MAX(pv.mrp) AS max_price,  
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
@@ -1601,8 +1602,7 @@ const ProductService = {
         'sku', pv.sku,
         'mrp', pv.mrp,
         'price', pv.price,
-        'sale_price', pv.sale_price,
-        'vendor_sale_price', pv.vendorsaleprice,
+        'vendorsaleprice', pv.vendorsaleprice,
         'vendor_mrp', pv.vendormrp,
         'stock', pv.stock,
         'variant_color', pv.variant_color,
@@ -1734,17 +1734,16 @@ const ProductService = {
       p.updated_at,
       p.is_our_picks,
       p.is_newest,
-      MIN(pv.sale_price) AS min_price,
+      MIN(pv.price) AS min_price,
       MAX(pv.mrp) AS max_price,
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
         'id', pv.id,
         'sku', pv.sku,
-        'mrp', pv.mrp,
+        'vendorsaleprice', pv.vendorsaleprice,
+        'vendormrp', pv.vendormrp,
         'price', pv.price,
-        'sale_price', pv.sale_price,
-        'vendor_sale_price', pv.vendorsaleprice,
-        'vendor_mrp', pv.vendormrp,
+        'mrp', pv.mrp,
         'stock', pv.stock,
         'variant_color', pv.variant_color,
         'variant_size', pv.variant_size,
@@ -1872,28 +1871,28 @@ const ProductService = {
       mapped_categories: mappedCategories, // ✅ all mapped categories with parent hierarchy
     };
   },
-  async updateProductPrice(productId, type, varient_id, price, client) {
+  async updateProductPrice(productId, type, varient_id, priceValue, client) {
     const validTypes = {
       mrp: "mrp",
-      sale_price: "sale_price",
+      price: "price",
     };
 
     if (!validTypes[type]) {
-      throw new AppError("Invalid type. Use 'mrp' or 'sale_price'", 400);
+      throw new AppError("Invalid type. Use 'mrp' or 'price'", 400);
     }
 
-    const column = type === "mrp" ? "mrp" : "sale_price";
+    const column = validTypes[type];
 
     const query = `
-        UPDATE product_variants 
+        UPDATE product_variants
         SET ${column} = $1, updated_at = NOW()
-        WHERE id = $2 
-          AND product_id = $3 
-          AND deleted_at IS NULL 
+        WHERE id = $2
+          AND product_id = $3
+          AND deleted_at IS NULL
         RETURNING *
     `;
 
-    const { rows } = await client.query(query, [price, varient_id, productId]);
+    const { rows } = await client.query(query, [priceValue, varient_id, productId]);
 
     if (rows.length === 0) {
       throw new AppError("Variant not found or already deleted", 404);
@@ -1918,19 +1917,20 @@ const ProductService = {
 
       const productIds = productRes.rows.map((r) => r.id);
 
-      // Step 2: SINGLE QUERY → Update all variants using their own vendor_sale_price
+      // Step 2: SINGLE QUERY → Update all variants based on vendor prices
+      // price = vendorsaleprice * 3
+      // mrp = calculated to maintain vendor's discount percentage
       const result = await client.query(
         `
       UPDATE product_variants
       SET
-        mrp = ROUND(
-          mrp * (1 + COALESCE(vendorsaleprice, 0) / 100),
-          2
-        ),
-        sale_price = ROUND(
-          sale_price * (1 + COALESCE(vendorsaleprice, 0) / 100),
-          2
-        ),
+        price = vendorsaleprice * 3,
+        mrp = CASE
+          WHEN vendormrp > 0 AND vendorsaleprice > 0 THEN
+            (vendorsaleprice * 3) / (1 - ((vendormrp - vendorsaleprice) / vendormrp))
+          ELSE
+            vendorsaleprice * 3
+        END,
         updated_at = NOW()
       WHERE
         product_id = ANY($1)
@@ -1940,8 +1940,9 @@ const ProductService = {
         id,
         product_id,
         vendorsaleprice,
-        mrp AS new_mrp,
-        sale_price AS new_sale_price
+        vendormrp,
+        price AS new_price,
+        mrp AS new_mrp
       `,
         [productIds]
       );
@@ -1954,9 +1955,10 @@ const ProductService = {
         updatedVariants: result.rows.map((r) => ({
           variant_id: r.id,
           product_id: r.product_id,
-          percent_applied: parseFloat(r.vendor_sale_price),
+          vendor_sale_price: parseFloat(r.vendorsaleprice),
+          vendor_mrp: parseFloat(r.vendormrp),
+          new_price: parseFloat(r.new_price),
           new_mrp: parseFloat(r.new_mrp),
-          new_sale_price: parseFloat(r.new_sale_price),
         })),
         message: `Updated ${result.rowCount} variants instantly`,
       };

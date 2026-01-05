@@ -68,13 +68,21 @@ function convertToAEDWithoutIncrement(value, conversionRate) {
    (Women > Shoes > Sneakers)
    ------------------------- */
 async function ensureCategoryPath(client, categoryPath) {
-  if (!categoryPath) return null;
+  if (!categoryPath) {
+    console.log("⚠️  No category path provided");
+    return null;
+  }
   const parts = String(categoryPath)
     .split(/->|>|\/|>/)
     .map((p) => p.trim())
     .filter(Boolean);
 
-  if (!parts.length) return null;
+  if (!parts.length) {
+    console.log("⚠️  Empty category path after parsing");
+    return null;
+  }
+
+  console.log(`📁 Processing category path: "${categoryPath}" → [${parts.join(" > ")}]`);
 
   let parentId = null;
   let parentPath = null;
@@ -90,6 +98,7 @@ async function ensureCategoryPath(client, categoryPath) {
     if (found.rowCount > 0) {
       parentId = found.rows[0].id;
       parentPath = currentPath;
+      console.log(`   ✓ Category exists: "${part}" (${currentPath})`);
       continue;
     }
 
@@ -115,8 +124,10 @@ async function ensureCategoryPath(client, categoryPath) {
     const ins = await client.query(insertSql, insertParams);
     parentId = ins.rows[0].id;
     parentPath = currentPath;
+    console.log(`   ➕ Created vendor category: "${part}" (${currentPath})`);
   }
 
+  console.log(`✅ Final category ID: ${parentId}`);
   return parentId;
 }
 
@@ -288,25 +299,48 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
   try {
     const { product, variants = [], category_path } = transformed;
 
+    console.log(`\n🔄 Processing product: "${product.name}" (SKU: ${product.product_sku})`);
+
     let defaultCategoryId = null;
     if (category_path) {
       defaultCategoryId = await ensureCategoryPath(client, category_path);
+    } else {
+      console.log("⚠️  No category path for this product");
     }
 
     // find existing product ONLY by product_sku (as you asked)
     let existing = null;
     if (product.product_sku) {
       const res = await client.query(
-        "SELECT id FROM products WHERE product_sku = $1 AND deleted_at IS NULL",
+        "SELECT id, default_category_id FROM products WHERE product_sku = $1 AND deleted_at IS NULL",
         [product.product_sku]
       );
-      if (res.rowCount) existing = res.rows[0];
+      if (res.rowCount) {
+        existing = res.rows[0];
+        console.log(`   ℹ️  Product exists in DB (ID: ${existing.id})`);
+      } else {
+        console.log(`   ℹ️  New product - will be inserted`);
+      }
     }
 
     let productId = existing ? existing.id : uuidv4();
 
     if (existing) {
+      // Check if product has "our category" mapping
+      const categoryCheck = await client.query(
+        `SELECT c.is_our_category, c.name, c.path
+         FROM categories c
+         WHERE c.id = $1 AND c.deleted_at IS NULL`,
+        [existing.default_category_id]
+      );
+
+      if (categoryCheck.rowCount > 0 && categoryCheck.rows[0].is_our_category) {
+        console.log(`   🔒 PRESERVING "our category": "${categoryCheck.rows[0].name}" (${categoryCheck.rows[0].path})`);
+      } else {
+        console.log(`   🔄 Updating vendor category to: ${category_path || 'NULL'}`);
+      }
       // update important fields (name, desc, brand, images, meta, attributes, category, supplier, etc.)
+      // PRESERVE "our category" if already mapped by admin
       await client.query(
         `
         UPDATE products SET
@@ -316,7 +350,12 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           description = $4,
           brand_name = $5,
           gender = $6,
-          default_category_id = $7,
+          default_category_id = CASE
+            WHEN default_category_id IN (
+              SELECT id FROM categories WHERE is_our_category = true AND deleted_at IS NULL
+            ) THEN default_category_id  -- Keep our category mapping
+            ELSE $7                      -- Update to new vendor category
+          END,
           attributes = $8::jsonb,
           product_meta = $9::jsonb,
           product_img = $10,
@@ -351,6 +390,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           productId,
         ]
       );
+      console.log(`   ✅ Product updated successfully`);
     } else {
       // insert new product
       const insertProductSql = `
@@ -394,9 +434,11 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       ];
       const ins = await client.query(insertProductSql, vals);
       productId = ins.rows[0].id;
+      console.log(`   ✅ Product inserted successfully (ID: ${productId})`);
     }
 
     // VARIANTS
+    console.log(`   🔢 Processing ${variants.length} variant(s)...`);
     const createdVariants = [];
 
     for (const v of variants) {
@@ -406,28 +448,31 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           .slice(2, 8)}`;
       }
 
+      console.log(`      → Variant SKU: ${v.sku} | Size: ${v.variant_size || 'N/A'} | Color: ${v.variant_color || 'N/A'} | Stock: ${v.stock || 0}`);
+
       const rawVendorMrp = v.vendormrp ?? null;
       const rawVendorSale = v.vendorsaleprice ?? v.price ?? null;
 
-      const convertedMrp = convertToAED(
-        rawVendorMrp,
-        opts.conversion_rate,
-        opts.increment_percent
-      );
-      const convertedSale = convertToAED(
-        rawVendorSale,
-        opts.conversion_rate,
-        opts.increment_percent
-      );
+      // New pricing formula:
+      // price = vendorsaleprice × 3
+      // mrp = (price) / (1 - ((vendormrp - vendorsaleprice) / vendormrp))
+      let ourPrice = null;
+      let ourMrp = null;
 
-      const vmrp_to_aed = convertToAEDWithoutIncrement(
-        rawVendorMrp,
-        opts.conversion_rate
-      );
-      const vsale_to_aed = convertToAEDWithoutIncrement(
-        rawVendorSale,
-        opts.conversion_rate
-      );
+      if (rawVendorSale && Number(rawVendorSale) > 0) {
+        ourPrice = Number((Number(rawVendorSale) * 3).toFixed(2));
+
+        if (rawVendorMrp && Number(rawVendorMrp) > Number(rawVendorSale)) {
+          // Calculate vendor discount percentage
+          const vendorDiscount = (Number(rawVendorMrp) - Number(rawVendorSale)) / Number(rawVendorMrp);
+          // Apply same discount to our price
+          ourMrp = Number((ourPrice / (1 - vendorDiscount)).toFixed(2));
+        } else {
+          ourMrp = ourPrice;
+        }
+      }
+
+      console.log(`         💰 Price: Vendor EUR ${rawVendorSale} → Our EUR ${ourPrice} | Vendor MRP EUR ${rawVendorMrp} → Our MRP EUR ${ourMrp}`);
 
       const varRes = await client.query(
         "SELECT id FROM product_variants WHERE sku = $1 AND product_id = $2 AND deleted_at IS NULL",
@@ -436,6 +481,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
 
       if (varRes.rowCount) {
         const vid = varRes.rows[0].id;
+        console.log(`         ✓ Variant exists - updating (ID: ${vid})`);
         await client.query(
           `
           UPDATE product_variants SET
@@ -443,36 +489,26 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
             vendormrp        = $2,
             vendorsaleprice  = $3,
             mrp              = $4,
-            sale_price       = $5,
-            vmrp_to_aed      = $6,
-            vsale_to_aed     = $7,
-            currency         = COALESCE($8, currency),
-            conversion_rate  = COALESCE($9, conversion_rate),
-            price            = $10,
-            stock            = $11,
-            weight           = $12,
-            attributes       = $13,
-            images           = $14,
-            variant_color    = $15,
-            variant_size     = $16,
-            country_of_origin= $17,
-            normalized_size  = $18,
-            normalized_color = $19,
-            size_type        = $20,
+            price            = $5,
+            stock            = $6,
+            weight           = $7,
+            attributes       = $8,
+            images           = $9,
+            variant_color    = $10,
+            variant_size     = $11,
+            country_of_origin= $12,
+            normalized_size  = $13,
+            normalized_color = $14,
+            size_type        = $15,
             updated_at       = now()
-          WHERE id = $21
+          WHERE id = $16
         `,
           [
             LUXURY_VENDOR_ID,
             rawVendorMrp || null,
             rawVendorSale || null,
-            convertedMrp,
-            convertedSale,
-            vmrp_to_aed,
-            vsale_to_aed,
-            opts.currency || null,
-            opts.conversion_rate || null,
-            v.price || rawVendorSale || null,
+            ourMrp,
+            ourPrice,
             v.stock || 0,
             v.weight || null,
             toJsonb(v.attributes || null),
@@ -488,24 +524,25 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         );
         createdVariants.push({ id: vid, sku: v.sku, updated: true });
       } else {
+        console.log(`         ➕ New variant - inserting`);
         const variantId = uuidv4();
 
         const variantInsertText = `
           INSERT INTO product_variants (
             id, vendor_id, product_id, sku, barcode, vendor_product_id, productpartnersku,
-            price, mrp, sale_price, stock, weight, dimension,
+            price, mrp, stock, weight, dimension,
             length, width, height, attributes, images, image_urls,
-            video1, video2, vendormrp, vendorsaleprice, ourmrp, oursaleprice,
+            video1, video2, vendormrp, vendorsaleprice,
             tax, tax1, tax2, tax3, variant_color, variant_size,
             country_of_origin, is_active, normalized_size, normalized_color, size_type,
-            currency, conversion_rate, vmrp_to_aed, vsale_to_aed, created_at, updated_at
+            created_at, updated_at
           )
           VALUES (
             $1,$2,$3,$4,$5,$6,$7,
-            $8,$9,$10,$11,$12,$13::jsonb,
-            $14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb,
-            $20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,$29,$30,$31,$32,
-            $33,$34,$35,$36,$37,$38,$39,$40, now(), now()
+            $8,$9,$10,$11,$12::jsonb,
+            $13,$14,$15,$16::jsonb,$17::jsonb,$18::jsonb,
+            $19,$20,$21,$22,$23::jsonb,$24,$25,$26,$27,$28,
+            $29,$30,$31,$32,$33, now(), now()
           ) RETURNING id
         `;
 
@@ -517,39 +554,32 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           v.barcode || null, // $5
           v.vendor_product_id || product.productid || null, // $6
           null, // $7 productpartnersku
-          v.price || rawVendorSale || null, // $8 price (vendor currency)
-          convertedMrp, // $9 mrp (AED + inc)
-          convertedSale, // $10 sale_price (AED + inc)
-          v.stock || 0, // $11 stock
-          v.weight || null, // $12 weight
-          toJsonb(v.dimension || null), // $13 dimension
-          v.length || null, // $14
-          v.width || null, // $15
-          v.height || null, // $16
-          toJsonb(v.attributes || null), // $17 attributes
-          toJsonb(v.images || null), // $18 images
-          null, // $19 image_urls
-          v.video1 || null, // $20
-          v.video2 || null, // $21
-          rawVendorMrp || null, // $22 vendormrp
-          rawVendorSale || null, // $23 vendorsaleprice
-          v.ourmrp || null, // $24 ourmrp
-          v.oursaleprice || null, // $25 oursaleprice
-          toJsonb(v.tax || null), // $26 tax
-          v.tax1 || null, // $27
-          v.tax2 || null, // $28
-          v.tax3 || null, // $29
-          v.variant_color || null, // $30
-          v.variant_size || null, // $31
-          v.country_of_origin || null, // $32
-          v.is_active !== undefined ? v.is_active : true, // $33
-          v.normalized_size || v.variant_size || null, // $34
-          v.normalized_color || v.variant_color || null, // $35
-          v.size_type || null, // $36
-          opts.currency || null, // $37
-          opts.conversion_rate || null, // $38
-          vmrp_to_aed, // $39
-          vsale_to_aed, // $40
+          ourPrice, // $8 price (our calculated price = vendorsaleprice * 3)
+          ourMrp, // $9 mrp (our calculated MRP)
+          v.stock || 0, // $10 stock
+          v.weight || null, // $11 weight
+          toJsonb(v.dimension || null), // $12 dimension
+          v.length || null, // $13
+          v.width || null, // $14
+          v.height || null, // $15
+          toJsonb(v.attributes || null), // $16 attributes
+          toJsonb(v.images || null), // $17 images
+          null, // $18 image_urls
+          v.video1 || null, // $19
+          v.video2 || null, // $20
+          rawVendorMrp || null, // $21 vendormrp
+          rawVendorSale || null, // $22 vendorsaleprice
+          toJsonb(v.tax || null), // $23 tax
+          v.tax1 || null, // $24
+          v.tax2 || null, // $25
+          v.tax3 || null, // $26
+          v.variant_color || null, // $27
+          v.variant_size || null, // $28
+          v.country_of_origin || null, // $29
+          v.is_active !== undefined ? v.is_active : true, // $30
+          v.normalized_size || v.variant_size || null, // $31
+          v.normalized_color || v.variant_color || null, // $32
+          v.size_type || null, // $33
         ];
 
         const inVar = await client.query(variantInsertText, variantVals);
@@ -560,6 +590,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         });
 
         if (v.stock && Number(v.stock) > 0) {
+          console.log(`         📦 Creating inventory transaction: +${v.stock} units`);
           await client.query(
             `
             INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
@@ -571,6 +602,8 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       }
     }
 
+    console.log(`   ✅ All variants processed (${createdVariants.length} total)`);
+
     // Product → category link
     if (defaultCategoryId) {
       const exists = await client.query(
@@ -578,6 +611,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         [productId, defaultCategoryId]
       );
       if (exists.rowCount === 0) {
+        console.log(`   🔗 Linking product to category in product_categories table`);
         await client.query(
           "INSERT INTO product_categories (id, product_id, category_id, vendor_id) VALUES ($1,$2,$3,$4)",
           [uuidv4(), productId, defaultCategoryId, LUXURY_VENDOR_ID]
@@ -724,9 +758,11 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
     }
 
     await client.query("COMMIT");
+    console.log(`✅ Product "${product.name}" committed successfully\n`);
     return { ok: true, productId, variants: createdVariants };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
+    console.log(`❌ ROLLBACK: Error processing product - ${err.message}\n`);
     throw err;
   }
 }
@@ -740,22 +776,46 @@ async function syncLuxuryProducts(opts) {
   const limit = 100;
   let totalFetched = 0;
   let totalProducts = 0;
+  let successCount = 0;
+  let errorCount = 0;
 
-  const token = await getLuxuryToken();
-  console.log("Luxury token obtained");
+  console.log("\n╔════════════════════════════════════════════════════════════════╗");
+  console.log("║     🚀 LUXURY DISTRIBUTION PRODUCT SYNC STARTED                ║");
+  console.log("╚════════════════════════════════════════════════════════════════╝");
+  console.log(`⚙️  Configuration:`);
+  console.log(`   → Currency: ${opts.currency}`);
+  console.log(`   → Conversion Rate: ${opts.conversion_rate}`);
+  console.log(`   → Markup Percentage: ${opts.increment_percent}%`);
+  console.log(`   → Batch Size: ${limit} products per page\n`);
+
+  let token = await getLuxuryToken();
+  console.log("🔑 Authentication token obtained successfully\n");
   const client = await dbPool.connect();
 
   try {
     logger.info("🚀 Starting Luxury Distribution product sync...");
-    console.log("🚀 Starting Luxury Distribution product sync...");
 
     while (true) {
-      const result = await getLuxuryProduct(page, limit, token);
-      const { data, total } = result;
+      console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`📄 Fetching page ${page}...`);
 
-      if (!data || data.length === 0) break;
+      const result = await getLuxuryProduct(page, limit, token);
+      const { data, total, newToken } = result;
+
+      // Update token if it was refreshed during the API call
+      if (newToken) {
+        token = newToken;
+        console.log("🔑 Token updated after refresh");
+      }
+
+      if (!data || data.length === 0) {
+        console.log(`⚠️  No more products found. Ending sync.`);
+        break;
+      }
 
       totalProducts = total;
+      console.log(`📦 Retrieved ${data.length} products (Total available: ${total})`);
+      console.log(`📊 Progress: ${totalFetched}/${total} (${((totalFetched/total)*100).toFixed(1)}%)\n`);
 
       logger.info(
         {
@@ -771,7 +831,11 @@ async function syncLuxuryProducts(opts) {
           const transformed = transformLuxuryProduct(item);
           await upsertProductAndVariant(client, transformed, opts);
           totalFetched += 1;
+          successCount += 1;
         } catch (e) {
+          errorCount += 1;
+          console.log(`\n❌ ERROR processing product: ${item.name || item.sku || item.id}`);
+          console.log(`   Error: ${e.message}`);
           logger.error(
             { product_id: item.id, sku: item.sku, err: e.message },
             "❌ Insert/Update error"
@@ -779,19 +843,34 @@ async function syncLuxuryProducts(opts) {
         }
       }
 
+      console.log(`\n✓ Page ${page} completed: ${successCount} succeeded, ${errorCount} failed`);
+
       page += 1;
 
-      if (totalFetched >= total) break;
+      if (totalFetched >= total) {
+        console.log(`\n🎯 All products processed!`);
+        break;
+      }
     }
 
+    console.log("\n╔════════════════════════════════════════════════════════════════╗");
+    console.log("║     ✅ LUXURY DISTRIBUTION SYNC COMPLETED                      ║");
+    console.log("╚════════════════════════════════════════════════════════════════╝");
+    console.log(`📊 Final Results:`);
+    console.log(`   → Total Products Available: ${totalProducts}`);
+    console.log(`   → Successfully Synced: ${successCount}`);
+    console.log(`   → Failed: ${errorCount}`);
+    console.log(`   → Success Rate: ${totalProducts > 0 ? ((successCount/totalProducts)*100).toFixed(1) : 0}%\n`);
+
     logger.info(
-      { totalFetched, totalProducts },
+      { totalFetched, totalProducts, successCount, errorCount },
       "✅ Luxury products synced successfully"
     );
 
-    return { totalFetched, totalProducts };
+    return { totalFetched, totalProducts, successCount, errorCount };
   } finally {
     client.release();
+    console.log("🔌 Database connection released\n");
   }
 }
 

@@ -273,6 +273,12 @@ const SaleService = {
         AND s.active = true
         AND (s.start_at IS NULL OR s.start_at <= $1)
         AND (s.end_at IS NULL OR s.end_at >= $1)
+        AND (p.vendor_id IS NULL OR EXISTS (
+          SELECT 1 FROM vendors v
+          WHERE v.id = p.vendor_id
+            AND v.status = 'active'
+            AND v.deleted_at IS NULL
+        ))
       GROUP BY s.id, p.id
       ORDER BY s.rank ASC NULLS LAST, s.created_at DESC
       LIMIT $2 OFFSET $3;

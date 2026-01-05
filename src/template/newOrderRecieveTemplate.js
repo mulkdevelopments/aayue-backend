@@ -4,7 +4,7 @@ module.exports.generateAdminNewOrderEmail = ({
   customerPhone,
   orderId,
   items,
-  currency = "AED",
+  currency = "€",
 }) => {
   if (
     !customerName ||

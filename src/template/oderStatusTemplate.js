@@ -3,7 +3,7 @@ module.exports.generateOrderStatusEmail = ({
   orderId,
   items,
   status, // processing, shipped, delivered, cancelled
-  currency = "AED",
+  currency = "€",
 }) => {
   console.log(
     customerName,
