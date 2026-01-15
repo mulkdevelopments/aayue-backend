@@ -235,6 +235,19 @@ router.get("/get-dashboard-data", indexCtrl.dashboardController.getDashboard);
 /** =================Luxury Product Routes==================== */
 router.post("/get-products-from-luxury", fetchAllLuxuryProducts);
 
+const { syncIndividualLuxuryProduct } = require("../controllers/importController/luxuryDistibution/luxuryIndividualSyncService");
+router.post("/sync-individual-product", syncIndividualLuxuryProduct);
+
+const { checkLuxuryStock } = require("../controllers/importController/luxuryDistibution/luxuryStockCheckService");
+router.get("/check-live-stock", checkLuxuryStock);
+
+/** =================Vendor Sync Job Routes==================== */
+const vendorSyncJobCtrl = require("../controllers/vendorSyncJobController");
+router.get("/vendor-sync-status/:jobId", vendorSyncJobCtrl.getSyncJobStatus);
+router.get("/vendor-sync-active/:vendorId", vendorSyncJobCtrl.getActiveSyncJob);
+router.post("/vendor-sync-cancel/:jobId", vendorSyncJobCtrl.cancelSyncJob);
+router.get("/vendor-sync-history/:vendorId", vendorSyncJobCtrl.getSyncJobHistory);
+
 /** ============================coupon routes======================== */
 
 router.post("/create-coupon", indexCtrl.couponController.createCoupon);
@@ -318,6 +331,19 @@ router.get('/list-sale-by-categories', indexCtrl.adminSalesController.listSaleBy
 router.post('/save-about-us', indexCtrl.aboutUsController.saveAboutUs);
 router.get('/get-about-us', indexCtrl.aboutUsController.getAboutUs);
 
+/**=================== Vendor Orders Routes ================  */
 
+const vendorOrderCtrl = require('../controllers/adminController/vendorOrderController');
+
+// Get vendor orders
+router.get('/vendor-orders/summary', vendorOrderCtrl.getVendorOrdersSummary);
+router.get('/vendor-orders/failed', vendorOrderCtrl.getFailedVendorOrders);
+router.get('/vendor-orders/pending', vendorOrderCtrl.getPendingVendorOrders);
+router.get('/vendor-orders/:orderId/details', vendorOrderCtrl.getOrderDetails);
+
+// Vendor order actions
+router.post('/vendor-orders/:orderId/retry', vendorOrderCtrl.retryVendorOrder);
+router.post('/vendor-orders/:orderId/sync-tracking', vendorOrderCtrl.syncOrderTracking);
+router.post('/vendor-orders/:orderId/place', vendorOrderCtrl.manualPlaceOrder);
 
 module.exports = router;

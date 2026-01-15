@@ -23,33 +23,33 @@ const worker = new Worker(
       return await sendOrderConfirmation(job.data.to, job.data.orderData);
     }
 
-    if (job.name === "sendAdminEmail") {
-      return await sendNewOrderNotificationEmail(
-        job.data.toList,
-        job.data.orderData
-      );
-    }
+    // if (job.name === "sendAdminEmail") {
+    //   return await sendNewOrderNotificationEmail(
+    //     job.data.toList,
+    //     job.data.orderData
+    //   );
+    // }
 
-    if (job.name === "sendInvoiceEmail") {
-      console.log("Generating PDF for Order #", job.data.orderNo);
-      let result = await generateInvoicePDF(
-        job.data.orderNo,
-        job.data.invoiceHTML
-      );
-      console.log("Generated PDF:", result);
+    // if (job.name === "sendInvoiceEmail") {
+    //   console.log("Generating PDF for Order #", job.data.orderNo);
+    //   let result = await generateInvoicePDF(
+    //     job.data.orderNo,
+    //     job.data.invoiceHTML
+    //   );
+    //   console.log("Generated PDF:", result);
 
-      await dbPool.query(
-        "UPDATE orders SET invoice_pdf_path = $1 WHERE id = $2",
-        [result.pdfRelativePath, job.data.orderId]
-      );
+    //   await dbPool.query(
+    //     "UPDATE orders SET invoice_pdf_path = $1 WHERE id = $2",
+    //     [result.pdfRelativePath, job.data.orderId]
+    //   );
 
-      const absolutePdfPath = path.isAbsolute(result.pdfFullPath)
-        ? result.pdfFullPath
-        : path.join(process.cwd(), result.pdfFullPath);
-      job.data.pdfFullPath = absolutePdfPath;
+    //   const absolutePdfPath = path.isAbsolute(result.pdfFullPath)
+    //     ? result.pdfFullPath
+    //     : path.join(process.cwd(), result.pdfFullPath);
+    //   job.data.pdfFullPath = absolutePdfPath;
 
-      return await sendInvoiceAttachmentEmail(job.data);
-    }
+    //   return await sendInvoiceAttachmentEmail(job.data);
+    // }
 
     return { skipped: true };
   },

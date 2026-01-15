@@ -15,7 +15,7 @@ module.exports.generateOrderConfirmationEmail = ({
       "Missing required parameters: customerName, orderId, and items array are required."
     );
   }
-
+console.log('order information in send mail', customerName, orderId, items, currency);
   // Generate table rows dynamically
   const tableRows = items
     .map(
@@ -33,7 +33,7 @@ module.exports.generateOrderConfirmationEmail = ({
                 <h4>${item.qty}</h4>
             </td>
             <td>
-                <h4>${currency} ${parseFloat(item.price).toFixed(2)}</h4>
+             <h4>${item.currency || "€"} ${((item.price || 0) * (item.exchange_rate || 1)).toFixed(2)}</h4>
             </td>
         </tr>`
     )

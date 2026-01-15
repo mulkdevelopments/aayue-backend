@@ -301,8 +301,60 @@ async function insertProducts(products, client) {
 }
 
 
+// Get individual product by ID from Luxury Distribution
+const getLuxuryProductById = async (productId, token) => {
+  const url = process.env.LUXURY_DISTRIBUTION_API_URL;
+  const endpoint = `${url}/v2/stocks/${productId}`;
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+
+  try {
+    const res = await axios.get(endpoint, { headers });
+    console.log("response data:", res.data);
+
+    // Check if API returned 'No data available' (custom_code: 45)
+    if (res.data.custom_code === '45' || !res.data.data) {
+      console.log("⚠️  Product not found or deleted from vendor (code 45)");
+      return null; // Product deleted or not found
+    }
+
+    return res.data.data; // Return single product data
+  } catch (err) {
+    // If token expired (401), refresh and retry once
+    if (err.response?.status === 401) {
+      console.log("⚠️  Token expired during API call, refreshing...");
+      const newToken = await getLuxuryToken(true); // force refresh
+      const headers = {
+        Authorization: `Bearer ${newToken}`,
+        "Content-Type": "application/json",
+      };
+      const res = await axios.get(endpoint, { headers });
+
+      // Check again after token refresh
+      if (res.data.custom_code === '45' || !res.data.data) {
+        console.log("⚠️  Product not found or deleted from vendor (code 45)");
+        return null;
+      }
+
+      return { data: res.data.data, newToken }; // return new token to update in caller
+    }
+
+    // Handle 404 or other errors
+    if (err.response?.status === 404) {
+      console.log("⚠️  Product not found (404)");
+      return null;
+    }
+
+    throw err;
+  }
+};
+
 module.exports = {
   getLuxuryToken,
   getLuxuryProduct,
+  getLuxuryProductById,
   insertProducts
 }; 

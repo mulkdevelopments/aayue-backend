@@ -88,9 +88,16 @@ router.get(
   "/get-product-by-id",
   indexCtrl.productManagementController.getProductById
 );
+
+const { checkLuxuryStock } = require("../controllers/importController/luxuryDistibution/luxuryStockCheckService");
+router.get("/check-live-stock", checkLuxuryStock);
 router.get(
   "/get-filters-for-products",
   indexCtrl.productManagementController.getDynamicFilters
+);
+router.get(
+  "/get-all-brands",
+  indexCtrl.productManagementController.getAllBrands
 );
 
 /**================== Best Seller Routes ================== */

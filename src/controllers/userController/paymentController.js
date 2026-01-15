@@ -22,6 +22,7 @@ const { generateInvoicePDF } = require("../../utils/generateInvociePdf");
 
 const { emailQueue, pdfQueue } = require("../../lib/queue");
 // const sendInvoiceAttachmentEmail = require("../../utils/sendMail");
+const { VendorOrderManager } = require("../../services/vendorOrders");
 
 // module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
 //     const client = await dbPool.connect();
@@ -793,100 +794,120 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
           },
         });
       }
-      try {
-        const adminEmails = await client
-          .query(
-            `SELECT email FROM admins WHERE role = 'superadmin' AND deleted_at IS NULL`
-          )
-          .then((result) => result.rows.map((row) => row.email));
-        await emailQueue.add("sendAdminEmail", {
-          toList: adminEmails,
-          orderData: {
-            customerName: user.full_name,
-            customerEmail: user.email,
-            customerPhone: user.phone || "N/A",
-            orderId: orderItems[0]?.order_no || order_id,
-            items: orderItems,
-            total: orderItems.reduce(
-              (acc, item) => acc + item.price * item.qty,
-              0
-            ),
-            currency: orderItems[0]?.currency_symbol || "€",
-          },
-        });
-      } catch (adminErr) {
-        console.error("⚠️ Failed to send admin new order email:", adminErr);
-      }
+      // try {
+      //   const adminEmails = await client
+      //     .query(
+      //       `SELECT email FROM admins WHERE role = 'superadmin' AND deleted_at IS NULL`
+      //     )
+      //     .then((result) => result.rows.map((row) => row.email));
+      //   await emailQueue.add("sendAdminEmail", {
+      //     toList: adminEmails,
+      //     orderData: {
+      //       customerName: user.full_name,
+      //       customerEmail: user.email,
+      //       customerPhone: user.phone || "N/A",
+      //       orderId: orderItems[0]?.order_no || order_id,
+      //       items: orderItems,
+      //       total: orderItems.reduce(
+      //         (acc, item) => acc + item.price * item.qty,
+      //         0
+      //       ),
+      //       currency: orderItems[0]?.currency_symbol || "€",
+      //     },
+      //   });
+      // } catch (adminErr) {
+      //   console.error("⚠️ Failed to send admin new order email:", adminErr);
+      // }
     } catch (mailErr) {
       console.error("Failed to send order confirmation email:", mailErr);
     }
 
     // --------------------------------------------
-    // 🧩 STEP 6: Generate Invoice PDF
+    // 🧩 STEP 6: Place Orders with Vendors (Async)
     // --------------------------------------------
-    try {
-      const invoiceData = {
-        orderId: orderItems[0]?.order_no || order_id,
-        orderDate: new Date().toLocaleDateString("en-IN", {
-          day: "2-digit",
-          month: "2-digit",
-          year: "numeric",
-        }),
-        invoiceStatus: "PAID",
-        paymentStatus: orderItems[0]?.payment_status || "Paid",
-        subtotal: orderItems
-          .reduce((acc, item) => acc + item.price * item.qty, 0)
-          .toFixed(2),
-        shipping: "0.00",
-        grandTotal: orderItems
-          .reduce((acc, item) => acc + item.price * item.qty, 0)
-          .toFixed(2),
+    // Don't await - let vendor orders process in background
+    // This prevents blocking customer response if vendor API is slow
+    VendorOrderManager.placeOrderItems(order_id)
+      .then((result) => {
+        console.log("✅ Vendor order placement completed:", result.summary);
+        // TODO: If any vendor failed, send notification to admin
+        if (result.summary.failCount > 0) {
+          console.error(`⚠️ ${result.summary.failCount} vendor(s) failed for order ${orderItems[0]?.order_no}`);
+          // TODO: Send alert to admin
+        }
+      })
+      .catch((error) => {
+        console.error("❌ Vendor order placement error:", error.message);
+        // Error is logged, admin can retry from dashboard
+        // Customer already has order confirmation, so we don't fail here
+      });
 
-        company: {
-          name: "FTVAAYEU",
-          address:
-            "Office 304, Al Saqr Tower Sheikh Zayed Road, Trade Centre 1 Dubai",
-          email: "help@aayeu.com",
-          phone: "+971-50-1234567",
-          logo: "https://yourdomain.com/files/logo.png",
-        },
+    // --------------------------------------------
+    // 🧩 STEP 7: Generate Invoice PDF
+    // --------------------------------------------
+    // try {
+    //   const invoiceData = {
+    //     orderId: orderItems[0]?.order_no || order_id,
+    //     orderDate: new Date().toLocaleDateString("en-IN", {
+    //       day: "2-digit",
+    //       month: "2-digit",
+    //       year: "numeric",
+    //     }),
+    //     invoiceStatus: "PAID",
+    //     paymentStatus: orderItems[0]?.payment_status || "Paid",
+    //     subtotal: orderItems
+    //       .reduce((acc, item) => acc + item.price * item.qty, 0)
+    //       .toFixed(2),
+    //     shipping: "0.00",
+    //     grandTotal: orderItems
+    //       .reduce((acc, item) => acc + item.price * item.qty, 0)
+    //       .toFixed(2),
 
-        customer: {
-          name: user.full_name,
-          address: orderItems[0]?.billing_address, // You can fetch from 'orders' if you store it there
-          email: user.email,
-          phone: "N/A",
-        },
-        items: orderItems.map((item) => ({
-          sku: item.sku || item.order_id,
-          product_name: item.name,
-          size: item.size || "-",
-          qty: item.qty,
-          unitPrice: Number(item.price).toFixed(2),
-          total: (Number(item.price) * item.qty).toFixed(2),
-        })),
-      };
+    //     company: {
+    //       name: "FTVAAYEU",
+    //       address:
+    //         "Office 304, Al Saqr Tower Sheikh Zayed Road, Trade Centre 1 Dubai",
+    //       email: "help@aayeu.com",
+    //       phone: "+971-50-1234567",
+    //       logo: "https://yourdomain.com/files/logo.png",
+    //     },
 
-      const invoiceHTML = generateInvoiceHTML(invoiceData);
+    //     customer: {
+    //       name: user.full_name,
+    //       address: orderItems[0]?.billing_address, // You can fetch from 'orders' if you store it there
+    //       email: user.email,
+    //       phone: "N/A",
+    //     },
+    //     items: orderItems.map((item) => ({
+    //       sku: item.sku || item.order_id,
+    //       product_name: item.name,
+    //       size: item.size || "-",
+    //       qty: item.qty,
+    //       unitPrice: Number(item.price).toFixed(2),
+    //       total: (Number(item.price) * item.qty).toFixed(2),
+    //     })),
+    //   };
 
-      try {
-        await emailQueue.add("sendInvoiceEmail", {
-          to: user.email,
-          customerName: user.full_name,
-          invoiceHTML: invoiceHTML,
-          orderId: order_id,
-          orderNo: orderItems[0]?.order_no,
-        });
-      } catch (mailErr) {
-        // Non-fatal: log and continue
-        console.error(
-          "⚠️ Failed to send invoice attachment email:",
-          mailErr.message || mailErr
-        );
-      }
-    } catch (pdfErr) {
-      console.error("❌ Failed to generate invoice PDF:", pdfErr);
-    }
+    //   const invoiceHTML = generateInvoiceHTML(invoiceData);
+
+    //   try {
+    //     await emailQueue.add("sendInvoiceEmail", {
+    //       to: user.email,
+    //       customerName: user.full_name,
+    //       invoiceHTML: invoiceHTML,
+    //       orderId: order_id,
+    //       orderNo: orderItems[0]?.order_no,
+    //     });
+    //   } catch (mailErr) {
+    //     // Non-fatal: log and continue
+    //     console.error(
+    //       "⚠️ Failed to send invoice attachment email:",
+    //       mailErr.message || mailErr
+    //     );
+    //   }
+    // } catch (pdfErr) {
+    //   console.error("❌ Failed to generate invoice PDF:", pdfErr);
+    // }
 
     return sendResponse(
       res,

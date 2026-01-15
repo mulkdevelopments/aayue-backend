@@ -404,7 +404,7 @@ const ProductService = {
       }
     }
 
-    // category subtree filter (keep as you had it but only used in base where)
+    // category filter: filter by mapped "our categories" (product_our_category_map)
     if (category_id) {
       const catRes = await client.query(
         `SELECT path FROM categories WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
@@ -416,26 +416,18 @@ const ProductService = {
       const parentPathRaw = catRes.rows[0].path || "";
       const parentPath = parentPathRaw.toLowerCase();
       params.push(parentPath);
-      params.push(`${parentPath}/%`);
-      whereClauses.push(`(
-                EXISTS (
-                  SELECT 1 FROM product_categories pc_sub
-                  JOIN categories c_sub ON c_sub.id = pc_sub.category_id
-                  WHERE pc_sub.product_id = p.id
-                    AND c_sub.deleted_at IS NULL
-                    AND (lower(c_sub.path) = $${idx} OR lower(c_sub.path) LIKE $${idx + 1
-        })
-                )
-                OR
-                EXISTS (
-                  SELECT 1 FROM categories c_def
-                  WHERE p.default_category_id = c_def.id
-                    AND c_def.deleted_at IS NULL
-                    AND (lower(c_def.path) = $${idx} OR lower(c_def.path) LIKE $${idx + 1
-        })
-                )
-            )`);
-      idx += 2;
+
+      // Filter by mapped "our categories" with exact path match
+      whereClauses.push(`
+        EXISTS (
+          SELECT 1 FROM product_our_category_map pom
+          JOIN categories mc ON mc.id = pom.our_category_id
+          WHERE pom.product_id = p.id
+            AND mc.deleted_at IS NULL
+            AND lower(mc.path) = $${idx}
+        )
+      `);
+      idx += 1;
     }
 
     const whereSQL = whereClauses.length
@@ -545,6 +537,7 @@ const ProductService = {
     p.id, p.product_sku, p.name, p.title, p.short_description, p.description, p.brand_name, p.gender,
     p.product_img, p.product_img1, p.product_img2, p.product_img3, p.product_img4, p.product_img5,
     p.vendor_id, p.default_category_id, p.country_of_origin, p.is_active, p.created_at, p.updated_at,
+    v.name AS vendor_name,
 
     -- ✅ Correct pricing aggregates
     MIN(pv.price) AS min_price,                       -- lowest price among variants
@@ -561,6 +554,7 @@ const ProductService = {
     COUNT(DISTINCT pv.id) AS variant_count
 
   FROM products p
+  LEFT JOIN vendors v ON v.id = p.vendor_id AND v.deleted_at IS NULL
   LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
   LEFT JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
   LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
@@ -569,7 +563,7 @@ const ProductService = {
   LEFT JOIN product_our_category_map pom ON pom.product_id = p.id
   LEFT JOIN categories mc ON mc.id = pom.our_category_id AND mc.deleted_at IS NULL
   WHERE p.id = ANY($1)
-  GROUP BY p.id
+  GROUP BY p.id, v.name
   ORDER BY array_position($1::uuid[], p.id)
 `;
 
@@ -595,6 +589,7 @@ const ProductService = {
       product_img4: r.product_img4,
       product_img5: r.product_img5,
       vendor_id: r.vendor_id,
+      vendor_name: r.vendor_name,
       default_category_id: r.default_category_id,
       country_of_origin: r.country_of_origin,
       is_active: r.is_active,
@@ -1448,11 +1443,13 @@ const ProductService = {
       p.updated_at,
       p.is_our_picks,
       p.is_newest,
+      v.name AS vendor_name,
+      v.capabilities AS vendor_capabilities,
 
      -- MIN(COALESCE(pv.sale_price, pv.price)) AS min_price,
      -- MAX(COALESCE(pv.sale_price, pv.price)) AS max_price,
      MIN(pv.price) AS min_price,                  -- lowest price among variants
-    MAX(pv.mrp) AS max_price,  
+    MAX(pv.mrp) AS max_price,
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
         'id', pv.id,
@@ -1469,7 +1466,8 @@ const ProductService = {
         'normalized_size_final', pv.normalized_size_final,
         'attributes', pv.attributes,
         'images', pv.images,
-        'country_of_origin', pv.country_of_origin
+        'country_of_origin', pv.country_of_origin,
+        'vendor_product_id', pv.vendor_product_id
       )) FILTER (WHERE pv.id IS NOT NULL), '[]') AS variants,
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
@@ -1489,6 +1487,13 @@ const ProductService = {
     LEFT JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
     LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
     LEFT JOIN product_dynamic_filters pdf ON pdf.product_id = p.id AND pdf.deleted_at IS NULL
+    LEFT JOIN vendors v ON v.id = (
+      SELECT DISTINCT c2.vendor_id
+      FROM product_categories pc2
+      INNER JOIN categories c2 ON c2.id = pc2.category_id
+      WHERE pc2.product_id = p.id AND pc2.deleted_at IS NULL
+      LIMIT 1
+    )
 
     WHERE p.deleted_at IS NULL AND p.is_active = TRUE AND p.id = $1
 
@@ -1498,7 +1503,7 @@ const ProductService = {
       p.sizechart_image,p.shipping_returns_payments,p.environmental_impact,p.product_img,
       p.product_img1,p.product_img2,p.product_img3,p.product_img4,p.product_img5,p.videos,
       p.delivery_time,p.cod_available,p.supplier,p.country_of_origin,p.is_active,p.created_at,
-      p.updated_at,p.is_our_picks,p.is_newest
+      p.updated_at,p.is_our_picks,p.is_newest,v.name,v.capabilities
   `;
 
     const productResult = await client.query(sqlProduct, [productId]);
@@ -1547,6 +1552,8 @@ const ProductService = {
       is_newest: p.is_newest,
       min_price: p.min_price ? Number(p.min_price) : null,
       max_price: p.max_price ? Number(p.max_price) : null,
+      vendor_name: p.vendor_name,
+      vendor_capabilities: p.vendor_capabilities,
       variants: variants,
       categories: p.categories,
       dynamic_filters: p.dynamic_filters,
@@ -1734,12 +1741,15 @@ const ProductService = {
       p.updated_at,
       p.is_our_picks,
       p.is_newest,
+      v.name AS vendor_name,
+      v.capabilities AS vendor_capabilities,
       MIN(pv.price) AS min_price,
       MAX(pv.mrp) AS max_price,
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
         'id', pv.id,
         'sku', pv.sku,
+        'vendor_product_id', pv.vendor_product_id,
         'vendorsaleprice', pv.vendorsaleprice,
         'vendormrp', pv.vendormrp,
         'price', pv.price,
@@ -1768,6 +1778,7 @@ const ProductService = {
       )) FILTER (WHERE pdf.id IS NOT NULL), '[]') AS dynamic_filters
 
     FROM products p
+    LEFT JOIN vendors v ON v.id = p.vendor_id AND v.deleted_at IS NULL
     LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
     LEFT JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
     LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
@@ -1779,7 +1790,7 @@ const ProductService = {
       p.sizechart_image,p.shipping_returns_payments,p.environmental_impact,p.product_img,
       p.product_img1,p.product_img2,p.product_img3,p.product_img4,p.product_img5,p.videos,
       p.delivery_time,p.cod_available,p.supplier,p.country_of_origin,p.is_active,p.created_at,
-      p.updated_at,p.is_our_picks,p.is_newest
+      p.updated_at,p.is_our_picks,p.is_newest,v.name,v.capabilities
   `;
 
     const productResult = await client.query(sqlProduct, [productId]);
@@ -1841,6 +1852,8 @@ const ProductService = {
     return {
       id: p.id,
       vendor_id: p.vendor_id,
+      vendor_name: p.vendor_name,
+      vendor_capabilities: p.vendor_capabilities,
       productid: p.productid,
       product_sku: p.product_sku,
       name: p.name,
@@ -1971,13 +1984,24 @@ const ProductService = {
   async getAllBrands(search, client) {
     if (search && search.length > 0) {
       const { rows } = await client.query(
-        `SELECT DISTINCT brand_name FROM products WHERE deleted_at IS NULL AND brand_name ILIKE $1`,
+        `SELECT DISTINCT p.brand_name
+         FROM products p
+         LEFT JOIN vendors v ON v.id = p.vendor_id
+         WHERE p.deleted_at IS NULL
+           AND p.brand_name ILIKE $1
+           AND (v.status = 'active' OR p.vendor_id IS NULL)
+         ORDER BY p.brand_name ASC`,
         [`%${search}%`]
       );
       return rows;
     }
     const { rows } = await client.query(
-      `SELECT DISTINCT brand_name FROM products WHERE deleted_at IS NULL`
+      `SELECT DISTINCT p.brand_name
+       FROM products p
+       LEFT JOIN vendors v ON v.id = p.vendor_id
+       WHERE p.deleted_at IS NULL
+         AND (v.status = 'active' OR p.vendor_id IS NULL)
+       ORDER BY p.brand_name ASC`
     );
     return rows;
   },

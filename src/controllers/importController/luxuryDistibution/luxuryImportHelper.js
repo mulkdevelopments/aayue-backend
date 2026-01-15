@@ -107,16 +107,29 @@ function transformRowToProduct(row) {
     const vendorMrp = row.original_price ? Number(row.original_price) : null;
     const vendorSalePrice = row.selling_price ? Number(row.selling_price) : null;
 
-    // Calculate our prices: price = vendorsaleprice * 3, mrp maintains vendor discount %
+    // Calculate our prices with tiered markup based on vendor sale price
+    // 10% markup on products > €1000
+    // 15% markup on products €501-999
+    // 20% markup on products €1-500
     let ourPrice = null;
     let ourMrp = null;
 
     if (vendorSalePrice && vendorSalePrice > 0) {
-        ourPrice = Number((vendorSalePrice * 3).toFixed(2));
+        let markupPercentage;
+
+        if (vendorSalePrice > 1000) {
+            markupPercentage = 0.18; // 10% markup
+        } else if (vendorSalePrice >= 501) {
+            markupPercentage = 0.27; // 15% markup
+        } else {
+            markupPercentage = 0.35; // 20% markup
+        }
+
+        ourPrice = Math.round(vendorSalePrice * (1 + markupPercentage));
 
         if (vendorMrp && vendorMrp > vendorSalePrice) {
             const vendorDiscount = (vendorMrp - vendorSalePrice) / vendorMrp;
-            ourMrp = Number((ourPrice / (1 - vendorDiscount)).toFixed(2));
+            ourMrp = Math.round(ourPrice / (1 - vendorDiscount));
         } else {
             ourMrp = ourPrice;
         }

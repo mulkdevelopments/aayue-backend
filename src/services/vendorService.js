@@ -9,7 +9,7 @@ const VendorService = {
     let paramIndex = 1;
 
     // 1. STATUS FILTER
-    if (status) {
+    if (status && status !== "all") {
       sql += ` AND status = $${paramIndex}`;
       values.push(status);
       paramIndex++;
@@ -21,6 +21,11 @@ const VendorService = {
       values.push(`%${search}%`);
       paramIndex++;
     }
+
+    // Get total count before pagination
+    const countSql = sql.replace("SELECT *", "SELECT COUNT(*)");
+    const countResult = await client.query(countSql, values.slice(0, paramIndex - 1));
+    const totalCount = parseInt(countResult.rows[0].count);
 
     // 3. PAGINATION
     const limit = 20;
@@ -37,7 +42,7 @@ const VendorService = {
         pagination: {
           page: pageNum,
           limit,
-          total: result.rowCount, // Note: rowCount is for current page
+          total: totalCount,
         },
       };
     } catch (err) {

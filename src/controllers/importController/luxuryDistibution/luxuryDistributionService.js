@@ -53,41 +53,74 @@ const limit = 100; // ek call me 100 products
 }); */
 
 module.exports.fetchAllLuxuryProducts = catchAsync(async (req, res, next) => {
-  // currency, conversion_rate, increment_percent from frontend
-  const { currency, conversion_rate, increment_percent } = req.body;
+  const dbPool = require("../../../db/dbConnection");
+  const { VendorSyncJobService } = require("../../../services/vendorSyncJobService");
 
-  if (!currency || typeof currency !== "string") {
-    return next(new AppError("currency is required (e.g. EUR)", 400));
-  }
-  if (!conversion_rate || isNaN(conversion_rate)) {
-    return next(new AppError("valid conversion_rate is required", 400));
-  }
-  if (!increment_percent || isNaN(increment_percent)) {
-    return next(new AppError("valid increment_percent is required", 400));
-  }
+  const LUXURY_VENDOR_ID = "65053474-4e40-44ee-941c-ef5253ea9fc9";
+  const client = await dbPool.connect();
 
-  const opts = {
-    currency: currency.toUpperCase(),
-    conversion_rate: parseFloat(conversion_rate),
-    increment_percent: parseFloat(increment_percent),
-  };
-
-  // Background me sync run hoga – request turant return ho jayega
-  setImmediate(async () => {
-    try {
-      await luxuryImportService.syncLuxuryProducts(opts);
-    } catch (err) {
-      console.error("❌ Luxury background sync error:", err.message || err);
+  try {
+    // Clean up stale/orphaned jobs (from server crashes/restarts)
+    const staleJobs = await VendorSyncJobService.markStaleJobsAsCancelled(client, LUXURY_VENDOR_ID, 30);
+    if (staleJobs.length > 0) {
+      console.log(`🧹 Cleaned up ${staleJobs.length} stale sync job(s): ${staleJobs.map(j => j.id).join(', ')}`);
     }
-  });
 
-  return sendResponse(
-    res,
-    202,
-    true,
-    "Luxury products sync started in background",
-    {
-      note: "Processing will continue in background. Check logs or DB for progress.",
+    // Check if there's already an active sync job for this vendor
+    const activeJob = await VendorSyncJobService.getActiveJobForVendor(client, LUXURY_VENDOR_ID);
+
+    if (activeJob) {
+      const formattedJob = VendorSyncJobService.formatJobResponse(activeJob);
+      return sendResponse(
+        res,
+        200,
+        true,
+        "Sync already in progress",
+        {
+          jobId: activeJob.id,
+          status: activeJob.status,
+          progress: formattedJob.progress,
+          message: "A sync job is already running. Please wait for it to complete or cancel it first.",
+        }
+      );
     }
-  );
+
+    // Create new sync job
+    const syncJob = await VendorSyncJobService.createSyncJob(client, {
+      vendorId: LUXURY_VENDOR_ID,
+      startedBy: req.user?.id || null,
+      metadata: {
+        source: "admin_manual_sync",
+        startedAt: new Date().toISOString(),
+      },
+    });
+
+    console.log(`🚀 Created sync job: ${syncJob.id} for Luxury-Distribution`);
+
+    // Start background sync with jobId
+    setImmediate(async () => {
+      try {
+        await luxuryImportService.syncLuxuryProducts(syncJob.id);
+      } catch (err) {
+        console.error("❌ Luxury background sync error:", err.message || err);
+      }
+    });
+
+    return sendResponse(
+      res,
+      202,
+      true,
+      "Luxury products sync started",
+      {
+        jobId: syncJob.id,
+        vendorId: LUXURY_VENDOR_ID,
+        status: syncJob.status,
+        message: "Sync started in background. Use the jobId to track progress.",
+      }
+    );
+  } catch (err) {
+    return next(new AppError(err.message || "Failed to start sync", 500));
+  } finally {
+    client.release();
+  }
 });

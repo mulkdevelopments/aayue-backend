@@ -68,9 +68,9 @@ web_modules/
 # dotenv environment variable files
 .env
 .env.*
-.env.example
-.env.local
-.env.docker
+!.env.example
+!.env.local
+!.env.docker
 
 # SSH tunnel PID file
 scripts/.tunnel.pid

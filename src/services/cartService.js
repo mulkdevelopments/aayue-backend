@@ -207,6 +207,7 @@ const CartService = {
       pv.images,
       pv.variant_size AS size,
       pv.variant_color AS color,
+      pv.vendor_product_id,
 
       p.id AS product_id,
       p.name AS product_name,
@@ -214,6 +215,8 @@ const CartService = {
       p.brand_name,
       p.gender,
       p.vendor_id,
+
+      v.capabilities AS vendor_capabilities,
 
       COALESCE(smax.discount_percent, 0)::numeric AS discount_percent,
 
@@ -237,6 +240,14 @@ const CartService = {
       ON pv.id = ci.variant_id AND pv.deleted_at IS NULL
     JOIN products p
       ON p.id = pv.product_id AND p.deleted_at IS NULL
+
+    LEFT JOIN vendors v ON v.id = (
+      SELECT DISTINCT c2.vendor_id
+      FROM product_categories pc2
+      INNER JOIN categories c2 ON c2.id = pc2.category_id
+      WHERE pc2.product_id = p.id AND pc2.deleted_at IS NULL
+      LIMIT 1
+    )
 
     LEFT JOIN LATERAL (
       SELECT MAX(discount_percent) AS discount_percent
@@ -309,6 +320,8 @@ const CartService = {
         brand_name: it.brand_name,
         gender: it.gender,
         vendorId: it.vendor_id,
+        vendor_product_id: it.vendor_product_id,
+        vendor_capabilities: it.vendor_capabilities,
       })),
 
       subtotal: +subtotal.toFixed(2),

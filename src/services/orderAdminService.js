@@ -497,6 +497,10 @@ SELECT
         'price', oi.price,
         'product_link', oi.product_link,
         'vendor_id', prod.vendor_id,
+        'vendor_order_status', oi.vendor_order_status,
+        'vendor_order_id', oi.vendor_order_id,
+        'vendor_reference_number', oi.vendor_reference_number,
+        'tracking_codes', oi.tracking_codes,
         'product', jsonb_build_object(
           'id', prod.id,
           'name', prod.name,
@@ -643,6 +647,10 @@ LIMIT 1;
         variant: it.variant || null,
         vendor: it.vendor || null, // ✅ vendor info per item
         product_link: it.product_link || null,
+        vendor_order_status: it.vendor_order_status || 'pending',
+        vendor_order_id: it.vendor_order_id || null,
+        vendor_reference_number: it.vendor_reference_number || null,
+        tracking_codes: it.tracking_codes || [],
       })),
     };
   },

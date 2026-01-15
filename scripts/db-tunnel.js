@@ -1,18 +1,3 @@
-#!/usr/bin/env node
-
-/**
- * SSH Tunnel Manager for Production Services Access
- *
- * This script manages SSH tunnels to production services (PostgreSQL, Redis, Elasticsearch).
- * It allows local development against production data securely.
- *
- * Usage:
- *   npm run db:tunnel          - Start all tunnels in foreground
- *   npm run db:tunnel:start    - Start all tunnels in background
- *   npm run db:tunnel:stop     - Stop background tunnels
- *   npm run db:tunnel:status   - Check tunnel status
- */
-
 const { spawn, exec } = require('child_process');
 const path = require('path');
 const os = require('os');

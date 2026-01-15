@@ -769,9 +769,11 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
 
 /* -------------------------
    MAIN Sync function
-   opts: { currency, conversion_rate, increment_percent }
+   jobId: UUID of the sync job for tracking progress
    ------------------------- */
-async function syncLuxuryProducts(opts) {
+async function syncLuxuryProducts(jobId) {
+  const { VendorSyncJobService } = require("../../../services/vendorSyncJobService");
+
   let page = 1;
   const limit = 100;
   let totalFetched = 0;
@@ -782,10 +784,7 @@ async function syncLuxuryProducts(opts) {
   console.log("\n╔════════════════════════════════════════════════════════════════╗");
   console.log("║     🚀 LUXURY DISTRIBUTION PRODUCT SYNC STARTED                ║");
   console.log("╚════════════════════════════════════════════════════════════════╝");
-  console.log(`⚙️  Configuration:`);
-  console.log(`   → Currency: ${opts.currency}`);
-  console.log(`   → Conversion Rate: ${opts.conversion_rate}`);
-  console.log(`   → Markup Percentage: ${opts.increment_percent}%`);
+  console.log(`📋 Job ID: ${jobId}`);
   console.log(`   → Batch Size: ${limit} products per page\n`);
 
   let token = await getLuxuryToken();
@@ -796,6 +795,20 @@ async function syncLuxuryProducts(opts) {
     logger.info("🚀 Starting Luxury Distribution product sync...");
 
     while (true) {
+      // Check for cancellation request
+      const shouldCancel = await VendorSyncJobService.shouldCancelJob(client, jobId);
+      if (shouldCancel) {
+        console.log(`\n🛑 Cancellation requested - stopping sync gracefully`);
+        await VendorSyncJobService.completeSyncJob(
+          client,
+          jobId,
+          'cancelled',
+          'Cancelled by user'
+        );
+        console.log("✅ Sync job marked as cancelled");
+        break;
+      }
+
       console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       console.log(`📄 Fetching page ${page}...`);
 
@@ -817,6 +830,14 @@ async function syncLuxuryProducts(opts) {
       console.log(`📦 Retrieved ${data.length} products (Total available: ${total})`);
       console.log(`📊 Progress: ${totalFetched}/${total} (${((totalFetched/total)*100).toFixed(1)}%)\n`);
 
+      // Update total products on first page
+      if (page === 1) {
+        await VendorSyncJobService.updateSyncProgress(client, jobId, {
+          totalProducts: total,
+          currentPage: page,
+        });
+      }
+
       logger.info(
         {
           page,
@@ -829,7 +850,7 @@ async function syncLuxuryProducts(opts) {
       for (const item of data) {
         try {
           const transformed = transformLuxuryProduct(item);
-          await upsertProductAndVariant(client, transformed, opts);
+          await upsertProductAndVariant(client, transformed, {});
           totalFetched += 1;
           successCount += 1;
         } catch (e) {
@@ -844,6 +865,14 @@ async function syncLuxuryProducts(opts) {
       }
 
       console.log(`\n✓ Page ${page} completed: ${successCount} succeeded, ${errorCount} failed`);
+
+      // Update progress after each page
+      await VendorSyncJobService.updateSyncProgress(client, jobId, {
+        processedProducts: totalFetched,
+        successfulProducts: successCount,
+        failedProducts: errorCount,
+        currentPage: page,
+      });
 
       page += 1;
 
@@ -862,12 +891,38 @@ async function syncLuxuryProducts(opts) {
     console.log(`   → Failed: ${errorCount}`);
     console.log(`   → Success Rate: ${totalProducts > 0 ? ((successCount/totalProducts)*100).toFixed(1) : 0}%\n`);
 
+    // Mark job as completed
+    await VendorSyncJobService.completeSyncJob(
+      client,
+      jobId,
+      'completed',
+      null,
+      null
+    );
+    console.log("✅ Sync job marked as completed");
+
     logger.info(
       { totalFetched, totalProducts, successCount, errorCount },
       "✅ Luxury products synced successfully"
     );
 
     return { totalFetched, totalProducts, successCount, errorCount };
+  } catch (err) {
+    // Mark job as failed on error
+    console.error("❌ Sync failed with error:", err.message);
+    try {
+      await VendorSyncJobService.completeSyncJob(
+        client,
+        jobId,
+        'failed',
+        err.message,
+        { stack: err.stack }
+      );
+      console.log("✅ Sync job marked as failed");
+    } catch (updateErr) {
+      console.error("❌ Failed to update job status:", updateErr.message);
+    }
+    throw err;
   } finally {
     client.release();
     console.log("🔌 Database connection released\n");

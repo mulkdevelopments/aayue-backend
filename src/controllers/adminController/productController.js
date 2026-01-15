@@ -105,6 +105,8 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
     const {
       q,
       category_id,
+      category, // category name (string)
+      category_path, // category path (string) e.g., "men/clothing/jacket"
       brand,
       vendor_id,
       min_price,
@@ -160,6 +162,27 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
     if (category_id && !isValidUUID(category_id))
       return next(new AppError("Invalid category_id", 400));
 
+    // If category path provided, look up category_id by exact path match
+    let resolvedCategoryId = category_id;
+    if (category_path && !category_id) {
+      const categoryLookup = await client.query(
+        `SELECT id FROM categories WHERE path = $1 AND deleted_at IS NULL LIMIT 1`,
+        [category_path]
+      );
+      if (categoryLookup.rowCount > 0) {
+        resolvedCategoryId = categoryLookup.rows[0].id;
+      }
+    } else if (category && !category_id && !category_path) {
+      // Fallback: If category name provided, look up category_id
+      const categoryLookup = await client.query(
+        `SELECT id FROM categories WHERE name = $1 AND deleted_at IS NULL LIMIT 1`,
+        [category]
+      );
+      if (categoryLookup.rowCount > 0) {
+        resolvedCategoryId = categoryLookup.rows[0].id;
+      }
+    }
+
     // parse include flags
     const includeParts = new Set(
       include
@@ -171,7 +194,7 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
     // build options object to pass into service
     const options = {
       q,
-      category_id: category_id || null,
+      category_id: resolvedCategoryId || null,
       brand: brand || null,
       vendor_id: vendor_id || null,
       min_price: isNaN(Number(min_price)) ? null : Number(min_price),
@@ -485,6 +508,7 @@ module.exports.getProductsFromOurCategories = catchAsync(
       const {
         q,
         category_id,
+        category_slug,
         vendor_id,
         min_price,
         max_price,
@@ -497,6 +521,18 @@ module.exports.getProductsFromOurCategories = catchAsync(
         limit: limitQ,
         include = "variants,categories,filters,media",
       } = req.query;
+
+      // ✅ If category_slug is provided, look up category_id by exact slug match
+      let resolvedCategoryId = category_id;
+      if (!resolvedCategoryId && category_slug) {
+        const slugLookup = await client.query(
+          `SELECT id FROM categories WHERE slug = $1 AND is_our_category = true AND deleted_at IS NULL LIMIT 1`,
+          [category_slug]
+        );
+        if (slugLookup.rows.length > 0) {
+          resolvedCategoryId = slugLookup.rows[0].id;
+        }
+      }
 
       // ✅ Parse multi-select filters
       const parseMulti = (v) => {
@@ -541,7 +577,7 @@ module.exports.getProductsFromOurCategories = catchAsync(
 
       const options = {
         q,
-        category_id,
+        category_id: resolvedCategoryId,
         vendor_id,
         brands,
         colors,
