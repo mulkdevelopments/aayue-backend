@@ -149,7 +149,7 @@ function transformRowToProduct(row) {
             if (!sizeKey) return;
             const qtyVal = Number(entry[sizeKey] ?? 0) || 0;
 
-            const vSku = productSku ? `${productSku}-${slugify(sizeKey)}` : null;
+            const vSku = productSku ? `${productSku}-${sizeKey}` : null;
 
             variants.push({
                 sku: vSku,

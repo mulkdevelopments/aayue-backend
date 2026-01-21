@@ -25,12 +25,12 @@ module.exports.syncIndividualLuxuryProduct = catchAsync(async (req, res, next) =
   try {
     let supplierProductId = vendorProductId;
 
-    // If only our productId is provided, fetch vendor_product_id from variants
+    // If only our productId is provided, fetch productid (vendor's product ID) from products table
     if (!supplierProductId && productId) {
       const result = await client.query(
-        `SELECT DISTINCT vendor_product_id
-         FROM product_variants
-         WHERE product_id = $1 AND vendor_product_id IS NOT NULL
+        `SELECT productid
+         FROM products
+         WHERE id = $1 AND productid IS NOT NULL AND deleted_at IS NULL
          LIMIT 1`,
         [productId]
       );
@@ -39,24 +39,23 @@ module.exports.syncIndividualLuxuryProduct = catchAsync(async (req, res, next) =
         return next(new AppError("Product not found or not linked to Luxury Distribution", 404));
       }
 
-      supplierProductId = result.rows[0].vendor_product_id;
+      supplierProductId = result.rows[0].productid;
     }
 
-    // Verify product belongs to Luxury Distribution vendor
+    // Verify product belongs to Luxury Distribution vendor (using products table, not variants)
     const vendorCheck = await client.query(
-      `SELECT p.id, p.name, pv.vendor_product_id
+      `SELECT p.id, p.name, p.productid
        FROM products p
-       INNER JOIN product_variants pv ON p.id = pv.product_id
-       INNER JOIN product_categories pc ON p.id = pc.product_id
-       INNER JOIN categories c ON pc.category_id = c.id
-       WHERE pv.vendor_product_id = $1
-       AND c.vendor_id = $2
+       WHERE p.productid = $1
+       AND p.vendor_id = $2
+       AND p.deleted_at IS NULL
        LIMIT 1`,
       [supplierProductId, LUXURY_VENDOR_ID]
     );
 
+    // If product doesn't exist yet, that's OK - we'll create it during sync
     if (vendorCheck.rows.length === 0) {
-      return next(new AppError("Product not found in Luxury Distribution vendor", 404));
+      console.log(`ℹ️ Product not found in DB, will be created during sync`);
     }
 
     console.log(`🔄 Syncing individual product: ${supplierProductId}`);

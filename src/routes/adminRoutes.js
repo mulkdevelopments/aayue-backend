@@ -69,6 +69,12 @@ router.put(
 
 router.post('/update-categroy-image', indexCtrl.categoryManagementController.updateImageInCategory)
 
+/** ================== AI Category Suggestions ================== */
+router.post(
+  "/ai-category-suggestions",
+  indexCtrl.aiSuggestionController.getAICategorySuggestions
+);
+
 /** ================== Product Routes ================== */
 
 router.post(
@@ -222,6 +228,7 @@ router.patch(
 );
 
 router.get("/get-vendor-by-id", indexCtrl.vendorController.getVendorById);
+router.get("/vendor-product-stats/:vendorId", indexCtrl.vendorController.getVendorProductStats);
 
 /**================= customer routers================ */
 

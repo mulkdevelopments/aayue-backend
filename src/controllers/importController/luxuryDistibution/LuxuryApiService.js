@@ -453,20 +453,30 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       const rawVendorMrp = v.vendormrp ?? null;
       const rawVendorSale = v.vendorsaleprice ?? v.price ?? null;
 
-      // New pricing formula:
-      // price = vendorsaleprice × 3
-      // mrp = (price) / (1 - ((vendormrp - vendorsaleprice) / vendormrp))
+      // Tiered markup pricing:
+      // 18% markup on products > €1000
+      // 27% markup on products €501-999
+      // 35% markup on products €1-500
       let ourPrice = null;
       let ourMrp = null;
 
       if (rawVendorSale && Number(rawVendorSale) > 0) {
-        ourPrice = Number((Number(rawVendorSale) * 3).toFixed(2));
+        let markupPercentage;
+        const salePrice = Number(rawVendorSale);
 
-        if (rawVendorMrp && Number(rawVendorMrp) > Number(rawVendorSale)) {
-          // Calculate vendor discount percentage
-          const vendorDiscount = (Number(rawVendorMrp) - Number(rawVendorSale)) / Number(rawVendorMrp);
-          // Apply same discount to our price
-          ourMrp = Number((ourPrice / (1 - vendorDiscount)).toFixed(2));
+        if (salePrice > 1000) {
+          markupPercentage = 0.18;
+        } else if (salePrice >= 501) {
+          markupPercentage = 0.27;
+        } else {
+          markupPercentage = 0.35;
+        }
+
+        ourPrice = Math.round(salePrice * (1 + markupPercentage));
+
+        if (rawVendorMrp && Number(rawVendorMrp) > salePrice) {
+          const vendorDiscount = (Number(rawVendorMrp) - salePrice) / Number(rawVendorMrp);
+          ourMrp = Math.round(ourPrice / (1 - vendorDiscount));
         } else {
           ourMrp = ourPrice;
         }
@@ -780,6 +790,7 @@ async function syncLuxuryProducts(jobId) {
   let totalProducts = 0;
   let successCount = 0;
   let errorCount = 0;
+  const syncedProductSkus = new Set(); // Track all synced product SKUs
 
   console.log("\n╔════════════════════════════════════════════════════════════════╗");
   console.log("║     🚀 LUXURY DISTRIBUTION PRODUCT SYNC STARTED                ║");
@@ -851,6 +862,10 @@ async function syncLuxuryProducts(jobId) {
         try {
           const transformed = transformLuxuryProduct(item);
           await upsertProductAndVariant(client, transformed, {});
+          // Track synced product SKU
+          if (transformed.product.product_sku) {
+            syncedProductSkus.add(transformed.product.product_sku);
+          }
           totalFetched += 1;
           successCount += 1;
         } catch (e) {
@@ -880,6 +895,24 @@ async function syncLuxuryProducts(jobId) {
         console.log(`\n🎯 All products processed!`);
         break;
       }
+    }
+
+    // Mark products not in sync as inactive
+    if (syncedProductSkus.size > 0) {
+      console.log(`\n🔄 Marking orphan products as inactive...`);
+      const skuArray = Array.from(syncedProductSkus);
+      const orphanResult = await client.query(
+        `UPDATE products
+         SET is_active = false, updated_at = now()
+         WHERE vendor_id = $1
+         AND product_sku IS NOT NULL
+         AND product_sku NOT IN (SELECT unnest($2::text[]))
+         AND is_active = true
+         AND deleted_at IS NULL`,
+        [LUXURY_VENDOR_ID, skuArray]
+      );
+      const orphanCount = orphanResult.rowCount;
+      console.log(`   → Marked ${orphanCount} orphan product(s) as inactive`);
     }
 
     console.log("\n╔════════════════════════════════════════════════════════════════╗");

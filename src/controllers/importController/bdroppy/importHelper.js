@@ -43,6 +43,14 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
     // Safe getters
     const get = (r, k) => (r && (r[k] !== undefined) ? String(r[k]).trim() : null);
 
+    // Normalize brand name to Title Case (e.g., "GUCCI" -> "Gucci")
+    const normalizeBrand = (brand) => {
+        if (!brand) return null;
+        const trimmed = brand.trim();
+        if (!trimmed) return null;
+        return trimmed.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+    };
+
     // Category path: combine Categorie and Sottocategorie if both present
     const catMain = get(productRow, 'Categorie') || null;
     const catSub = get(productRow, 'Sottocategorie') || null;
@@ -66,7 +74,7 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
         short_description: null,
         // plain_description column contains HTML — keep it as description (you can strip tags if needed)
         description: get(productRow, 'plain_description') || null,
-        brand_name: get(productRow, 'brand') || get(productRow, 'Firme') || null,
+        brand_name: normalizeBrand(get(productRow, 'brand') || get(productRow, 'Firme')),
         product_img: images[0] || null,
         product_img1: images[0] || null,
         product_img2: images[1] || null,
@@ -84,7 +92,7 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
         videos: null,
         delivery_time: null,
         cod_available: true,
-        supplier: get(productRow, 'brand') || get(productRow, 'Firme') || null,
+        supplier: normalizeBrand(get(productRow, 'brand') || get(productRow, 'Firme')),
         country_of_origin: get(productRow, 'madein') || get(productRow, 'Produzione') || null,
         gender: get(productRow, 'Genere') || null,
         is_active: true,

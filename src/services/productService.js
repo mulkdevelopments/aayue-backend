@@ -778,8 +778,8 @@ const ProductService = {
      // ✅ Other filters (same as before)
  
      if (brands.length > 0) {
-       params.push(brands);
-       whereClauses.push(`p.brand_name = ANY($${idx}::text[])`);
+       params.push(brands.map(b => b.toLowerCase()));
+       whereClauses.push(`LOWER(TRIM(p.brand_name)) = ANY($${idx}::text[])`);
        idx++;
      }
  
@@ -1107,8 +1107,8 @@ const ProductService = {
 
     // ✅ Other filters
     if (brands.length > 0) {
-      params.push(brands);
-      whereClauses.push(`p.brand_name = ANY($${idx}::text[])`);
+      params.push(brands.map(b => b.toLowerCase()));
+      whereClauses.push(`LOWER(TRIM(p.brand_name)) = ANY($${idx}::text[])`);
       idx++;
     }
 

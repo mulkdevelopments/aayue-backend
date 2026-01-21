@@ -207,7 +207,7 @@ async function upsertProductAndVariant(client, transformed) {
             // Decide SKU for variant: if product_sku + size present, make `${product_sku}-${size}`, else use v.sku or fallback
             if (!v.sku) {
                 const base = product.product_sku || productProductId || productId;
-                v.sku = v.variant_size ? `${base}-${helpers.slugify(v.variant_size)}` : `${base}-${Math.random().toString(36).slice(2, 8)}`;
+                v.sku = v.variant_size ? `${base}-${v.variant_size}` : `${base}-${Math.random().toString(36).slice(2, 8)}`;
             }
 
             const varRes = await client.query(

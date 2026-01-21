@@ -1223,7 +1223,10 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
 
     /** STEP-2: Base WHERE */
     let baseParams = [];
-    let baseWhere = "p.deleted_at IS NULL";
+    let baseWhere = `p.deleted_at IS NULL
+      AND (p.vendor_id IS NULL OR EXISTS (
+        SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active'
+      ))`;
 
     if (vendorCategoryIds.length > 0) {
       baseParams.push(vendorCategoryIds);
@@ -1243,8 +1246,8 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     let filterWhere = baseWhere;
 
     if (brands.length > 0) {
-      params.push(brands);
-      filterWhere += ` AND p.brand_name = ANY($${params.length})`;
+      params.push(brands.map(b => b.toLowerCase()));
+      filterWhere += ` AND LOWER(TRIM(p.brand_name)) = ANY($${params.length})`;
     }
 
     if (sizes.length > 0) {
@@ -1285,7 +1288,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     /** STEP-4: Full filter set from category only (NO q applied) */
     const allFiltersSQL = `
       SELECT
-          ARRAY_AGG(DISTINCT p.brand_name) FILTER (WHERE p.brand_name IS NOT NULL) AS brands,
+          ARRAY_AGG(DISTINCT INITCAP(TRIM(p.brand_name))) FILTER (WHERE p.brand_name IS NOT NULL AND TRIM(p.brand_name) <> '') AS brands,
           ARRAY_AGG(DISTINCT pv.normalized_color) FILTER (WHERE pv.normalized_color IS NOT NULL) AS colors,
           ARRAY_AGG(DISTINCT pv.variant_size) FILTER (WHERE pv.variant_size IS NOT NULL) AS sizes
       FROM products p

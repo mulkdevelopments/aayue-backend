@@ -28,6 +28,7 @@ const policyController = require("./adminController/policyController");
 const contactUsController = require("./contactUsController/contactUs");
 const newsLetterController = require("./newsLetterController/newsletterController");
 const aboutUsController = require("./adminController/aboutUsController");
+const aiSuggestionController = require("./adminController/aiSuggestionController");
 
 const indexCtrl = {
   userAuthController,
@@ -59,7 +60,8 @@ const indexCtrl = {
   policyController,
   contactUsController,
   newsLetterController,
-  aboutUsController
+  aboutUsController,
+  aiSuggestionController
 };
 
 module.exports = indexCtrl;
