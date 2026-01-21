@@ -10,7 +10,7 @@ const CategoryService = {
         return rows[0] || null;
     },
 
-    // create category, maintaining nested-set (lft/rgt) and path.
+    // create category,, maintaining nested-set (lft/rgt) and path.
     //
     // rules:
     // - if parent_id provided: insert as last child of parent (parent.rgt)
