@@ -1,5 +1,5 @@
 // controllers/newsletterController.js
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const db = require("../../db/dbConnection"); // adjust path to your pg pool
 const AppError = require("../../errorHandling/AppError");
 const catchAsync = require("../../errorHandling/catchAsync");
@@ -24,7 +24,7 @@ module.exports.subscribeNewsletter = catchAsync(async (req, res, next) => {
         return next(new AppError("Invalid email format", 400));
     }
 
-    const id = uuidv4();
+    const id = randomUUID();
 
     const sql = `
         INSERT INTO newsletter_subscribers (

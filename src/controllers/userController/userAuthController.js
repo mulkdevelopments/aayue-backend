@@ -6,10 +6,11 @@ const dbPool = require("../../db/dbConnection");
 const AppError = require("../../errorHandling/AppError");
 const { UserServices } = require("../../services/userServices");
 const { isValidEmail, isValidUUID } = require("../../utils/basicValidation");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const nodemailer = require("nodemailer");
 
-const { generateAuthUrl } = require("../../utils/googleAuth");
+const { generateAuthUrl: generateGoogleAuthUrl } = require("../../utils/googleAuth");
+const appleAuth = require("../../utils/appleAuth");
 const { createToken } = require("../../utils/helper");
 
 // Generate Magic Link Token
@@ -96,7 +97,14 @@ module.exports.registerGuestUser = catchAsync(async (req, res, next) => {
 
     // ✅ If new user → create entry
     user = await UserServices.createUser(
-      { full_name, email, phone, provider: "local", google_sub: null },
+      {
+        full_name,
+        email,
+        phone,
+        provider: "local",
+        google_sub: null,
+        apple_sub: null,
+      },
       client
     );
 
@@ -153,7 +161,14 @@ module.exports.registerUser = catchAsync(async (req, res, next) => {
 
     // ✅ Create new user
     const user = await UserServices.createUser(
-      { full_name, email, phone, provider: "local", google_sub: null },
+      {
+        full_name,
+        email,
+        phone,
+        provider: "local",
+        google_sub: null,
+        apple_sub: null,
+      },
       client
     );
 
@@ -489,7 +504,7 @@ module.exports.addAddress = catchAsync(async (req, res, next) => {
       );
     }
 
-    const id = uuidv4();
+    const id = randomUUID();
     const insertSQL = `
       INSERT INTO addresses (
         id, user_id, label, street, city, state, postal_code, country,
@@ -751,7 +766,7 @@ module.exports.deleteAddress = catchAsync(async (req, res, next) => {
 module.exports.googleAuthRedirect = (req, res) => {
   // build google auth url and redirect (client side can also open this URL)
   try {
-    const url = generateAuthUrl();
+    const url = generateGoogleAuthUrl();
     return res.redirect(url);
   } catch (err) {
     return res.status(500).send("Failed to build Google auth URL");
@@ -783,6 +798,70 @@ module.exports.googleAuthCallback = catchAsync(async (req, res, next) => {
   } catch (error) {
     await client.query("ROLLBACK").catch(() => { });
     return next(new AppError(error.message || "Google auth failed", 500));
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.appleAuthRedirect = (req, res) => {
+  try {
+    const url = appleAuth.generateAuthUrl();
+    return res.redirect(url);
+  } catch (err) {
+    return res.status(500).send("Failed to build Apple auth URL");
+  }
+};
+
+module.exports.appleAuthCallback = catchAsync(async (req, res, next) => {
+  const code = req.body.code || req.query.code;
+  if (!code) return next(new AppError("Authorization code not provided", 400));
+
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const tokenRes = await appleAuth.exchangeCodeForTokens(code);
+    const idToken = tokenRes?.id_token;
+    if (!idToken) {
+      throw new AppError("Apple id_token missing", 400);
+    }
+
+    const applePayload = await appleAuth.verifyIdToken(idToken);
+    const appleSub = applePayload?.sub;
+    const email = applePayload?.email || null;
+
+    let fullName = null;
+    if (req.body?.user) {
+      try {
+        const userData =
+          typeof req.body.user === "string"
+            ? JSON.parse(req.body.user)
+            : req.body.user;
+        const firstName = userData?.name?.firstName || "";
+        const lastName = userData?.name?.lastName || "";
+        const combined = `${firstName} ${lastName}`.trim();
+        if (combined) fullName = combined;
+      } catch (err) {
+        // ignore parse errors for optional name payload
+      }
+    }
+
+    const user = await UserServices.loginWithApple(
+      { appleSub, email, fullName },
+      client
+    );
+
+    const accessToken = createToken({ userId: user.id, email: user.email });
+
+    await client.query("COMMIT");
+
+    const redirectTo = process.env.FRONTEND_URL || "http://localhost:3000";
+    return res.redirect(
+      redirectTo + `/auth?type=apple&accessToken=${accessToken}`
+    );
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return next(new AppError(error.message || "Apple auth failed", 500));
   } finally {
     client.release();
   }

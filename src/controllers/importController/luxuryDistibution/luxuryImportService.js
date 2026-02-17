@@ -2,14 +2,24 @@
 const fs = require('fs');
 const path = require('path');
 const csv = require('fast-csv');
-const PQueue = require('p-queue').default;
 const pino = require('pino');
 const { Pool } = require('pg');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require("crypto");
 const { Readable } = require('stream');
 require('dotenv').config();
 
+let PQueue = null;
+const getPQueue = async () => {
+    if (!PQueue) {
+        const mod = await import('p-queue');
+        PQueue = mod.default || mod;
+    }
+    return PQueue;
+};
+
 const helpers = require('./luxuryImportHelper');
+const { normalizeBrandName } = require("../../../utils/normalize");
+const { isBrandExcluded } = require("../excludedBrands");
 
 const logger = pino({ level: process.env.IMPORT_LOG_LEVEL || 'info' });
 
@@ -41,7 +51,7 @@ async function ensureCategoryPath(client, categoryPath) {
         const slug = helpers.slugify(part);
         const currentPath = parentPath ? `${parentPath}/${slug}` : slug;
 
-        const id = uuidv4();
+        const id = randomUUID();
         const metadata = { created_via_import: true };
 
         const { rows } = await client.query(
@@ -77,7 +87,7 @@ async function upsertProductAndVariant(client, transformed) {
         if (category_path) defaultCategoryId = await ensureCategoryPath(client, category_path);
 
         // PRODUCT — idempotent on product_sku
-        let productId = uuidv4();
+        let productId = randomUUID();
         const productSku = product.product_sku || null;
         const productProductId = product.productid || null;
 
@@ -160,13 +170,13 @@ async function upsertProductAndVariant(client, transformed) {
                 const insertProductSql = `
           INSERT INTO products (
             id, vendor_id, productid, product_sku, productpartnersku, name, title,
-            short_description, description, brand_name, gender, default_category_id, attributes,
+            short_description, description, brand_name, brand_name_normalized, gender, default_category_id, attributes,
             product_meta, sizechart_text, sizechart_image, shipping_returns_payments, environmental_impact,
             product_img, videos, delivery_time, cod_available, supplier, country_of_origin, is_active, created_at, updated_at
           ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-            $13::jsonb,$14::jsonb,$15,$16,$17::jsonb,$18::jsonb,
-            $19,$20::jsonb,$21,$22,$23,$24,$25, now(), now()
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+            $14::jsonb,$15::jsonb,$16,$17,$18::jsonb,$19::jsonb,
+            $20,$21::jsonb,$22,$23,$24,$25,$26, now(), now()
           ) RETURNING id
         `;
                 const vals = [
@@ -180,6 +190,7 @@ async function upsertProductAndVariant(client, transformed) {
                     product.short_description || null,
                     product.description || null,
                     product.brand_name || null,
+                    normalizeBrandName(product.brand_name),
                     product.gender || null,
                     defaultCategoryId || null,
                     helpers.toJsonb(product.attributes || null),
@@ -245,7 +256,7 @@ async function upsertProductAndVariant(client, transformed) {
                 );
                 createdVariants.push({ id: vid, sku: v.sku, updated: true });
             } else {
-                const variantId = uuidv4();
+                const variantId = randomUUID();
                 const variantInsertText = `
           INSERT INTO product_variants (
             id, vendor_id, product_id, sku, barcode, vendor_product_id, productpartnersku,
@@ -308,7 +319,7 @@ async function upsertProductAndVariant(client, transformed) {
                     await client.query(
                         `INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
              VALUES ($1,$2,$3,$4,$5, now())`,
-                        [uuidv4(), inVar.rows[0].id, v.stock, 'initial_import', null]
+                        [randomUUID(), inVar.rows[0].id, v.stock, 'initial_import', null]
                     );
                 }
             }
@@ -323,7 +334,7 @@ async function upsertProductAndVariant(client, transformed) {
             if (exists.rowCount === 0) {
                 await client.query(
                     'INSERT INTO product_categories (id, product_id, category_id,vendor_id) VALUES ($1,$2,$3,$4)',
-                    [uuidv4(), productId, defaultCategoryId, VENDOR_ID]
+                    [randomUUID(), productId, defaultCategoryId, VENDOR_ID]
                 );
             }
         }
@@ -344,7 +355,7 @@ async function upsertProductAndVariant(client, transformed) {
             if (ex.rowCount === 0) {
                 await client.query(
                     'INSERT INTO product_dynamic_filters (id, product_id, filter_type, filter_name,vendor_id) VALUES ($1,$2,$3,$4,$5)',
-                    [uuidv4(), productId, df.filter_type, df.filter_name, VENDOR_ID]
+                    [randomUUID(), productId, df.filter_type, df.filter_name, VENDOR_ID]
                 );
             }
         }
@@ -365,7 +376,7 @@ async function upsertProductAndVariant(client, transformed) {
                 [url, variant_id]
             );
             if (exist.length > 0) return exist[0].id;
-            const mediaId = uuidv4();
+            const mediaId = randomUUID();
             await client.query(
                 `INSERT INTO media (id, name, variant_id, url, type, metadata, created_at)
          VALUES ($1,$2,$3,$4,$5,$6, now())`,
@@ -415,7 +426,12 @@ async function upsertProductAndVariant(client, transformed) {
 // ---------- PROCESSORS ----------
 async function processRow(row, lineNumber) {
     const transformed = helpers.transformRowToProduct(row);
-    console.log(transformed, "transformeddddddddddd")
+    if (!transformed) {
+        return { ok: true, skipped: true };
+    }
+    if (isBrandExcluded(transformed?.product?.brand_name)) {
+        return { ok: true, skipped: true };
+    }
     const client = await pool.connect();
     try {
         const res = await upsertProductAndVariant(client, transformed);
@@ -430,7 +446,8 @@ async function processRow(row, lineNumber) {
 
 async function processCSVBuffer(buffer, opts = {}) {
     const { concurrency, errFileDir } = Object.assign({}, DEFAULTS, opts);
-    const queue = new PQueue({ concurrency });
+    const Queue = await getPQueue();
+    const queue = new Queue({ concurrency });
 
     const ERR_FILE = path.join(errFileDir, `ld_import_errors_${Date.now()}.jsonl`);
     fs.writeFileSync(ERR_FILE, '');

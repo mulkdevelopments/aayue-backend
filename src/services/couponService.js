@@ -1,6 +1,6 @@
 const dbPool = require("../db/dbConnection");
 const AppError = require("../errorHandling/AppError");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const { isValidUUID } = require("../utils/basicValidation");
 
 function toJsonOrNull(val, fieldName) {
@@ -171,7 +171,7 @@ const CouponService = {
     `;
 
     const couponInsertValues = [
-      uuidv4(), // id
+      randomUUID(), // id
       payload.code,
       payload.type,
       payload.value === undefined ? null : Number(payload.value),

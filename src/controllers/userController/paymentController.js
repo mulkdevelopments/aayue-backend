@@ -436,15 +436,25 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
       });
     }
 
-    // Create Stripe session with adjustedLineItems
-    // Google Pay is already enabled in your Stripe dashboard and works automatically
-    // UPI-specific payment methods require additional setup in India
+    const normalizedCountry = String(shipping_address.country || "")
+      .trim()
+      .toUpperCase();
+    const isIndia =
+      normalizedCountry === "IN" || normalizedCountry === "INDIA";
+    const enableUpi = process.env.ENABLE_STRIPE_UPI === "true";
     const paymentMethods = ["card"];
+    if (enableUpi && isIndia) {
+      if (String(selectedCurrency).toUpperCase() === "USD") {
+        paymentMethods.push("upi");
+      } else {
+        console.warn(
+          "UPI requires USD presentment currency; falling back to card."
+        );
+      }
+    }
 
-    // Add additional payment methods based on currency
-    // Google Pay will automatically show for supported currencies when enabled
-
-    const session = await stripe.checkout.sessions.create({
+    // Create Stripe session with adjustedLineItems
+    const sessionPayload = {
       payment_method_types: paymentMethods,
       mode: "payment",
       line_items: adjustedLineItems,
@@ -456,7 +466,27 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
       },
       success_url: `${process.env.FRONTEND_URL}/success-payment?order_id=${order.id}`,
       cancel_url: `${process.env.FRONTEND_URL}/checkout-cancelled`,
-    });
+    };
+
+    let session;
+    try {
+      session = await stripe.checkout.sessions.create(sessionPayload);
+    } catch (err) {
+      const invalidPaymentMethods =
+        err?.raw?.param?.startsWith("payment_method_types") ||
+        /payment_method_types/i.test(err?.message || "");
+      if (paymentMethods.includes("upi") && invalidPaymentMethods) {
+        console.warn(
+          "UPI not available for this account/currency; retrying with card only."
+        );
+        session = await stripe.checkout.sessions.create({
+          ...sessionPayload,
+          payment_method_types: ["card"],
+        });
+      } else {
+        throw err;
+      }
+    }
 
     if (!session || !session.id) {
       await client.query("ROLLBACK").catch(() => {});

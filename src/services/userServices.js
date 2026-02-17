@@ -12,6 +12,11 @@ module.exports.UserServices = {
     const { rows } = await client.query(q, [googleSub]);
     return rows[0] || null;
   },
+  async findUserByAppleSub(appleSub, client) {
+    const q = `SELECT * FROM users WHERE apple_sub = $1 LIMIT 1`;
+    const { rows } = await client.query(q, [appleSub]);
+    return rows[0] || null;
+  },
 
   findUserByEmail: async (email, client = dbPool) => {
     const { rows } = await client.query(queries.findUserByEmail, [email]);
@@ -24,7 +29,7 @@ module.exports.UserServices = {
   },
 
   createUser: async (
-    { full_name, email, phone, provider, google_sub },
+    { full_name, email, phone, provider, google_sub, apple_sub },
     client = dbPool
   ) => {
     const { rows } = await client.query(queries.insertUser, [
@@ -33,6 +38,7 @@ module.exports.UserServices = {
       phone,
       provider,
       google_sub,
+      apple_sub,
     ]);
     return rows[0];
   },
@@ -119,6 +125,7 @@ module.exports.UserServices = {
           phone: "",
           provider: "google",
           google_sub: profile.sub,
+          apple_sub: null,
         };
         user = await this.createUser(userData, client);
       }
@@ -135,6 +142,40 @@ module.exports.UserServices = {
     }
 
     // 4) return user object
+    return user;
+  },
+  async loginWithApple({ appleSub, email, fullName }, client) {
+    if (!appleSub) throw new Error("Apple sub is required");
+
+    let user = await this.findUserByAppleSub(appleSub, client);
+
+    if (!user) {
+      if (!email) {
+        throw new Error("Apple login missing email");
+      }
+
+      const byEmail = await this.findUserByEmail(email, client);
+      if (byEmail) {
+        const updateQ = `UPDATE users SET apple_sub = $1, provider = 'apple', updated_at = NOW() WHERE id = $2 RETURNING *`;
+        const { rows } = await client.query(updateQ, [appleSub, byEmail.id]);
+        user = rows[0];
+      } else {
+        const userData = {
+          full_name: fullName || email,
+          email,
+          phone: "",
+          provider: "apple",
+          google_sub: null,
+          apple_sub: appleSub,
+        };
+        user = await this.createUser(userData, client);
+      }
+    } else if (user.provider !== "apple") {
+      const updateQ = `UPDATE users SET provider = 'apple', updated_at = NOW() WHERE id = $1 RETURNING *`;
+      const { rows } = await client.query(updateQ, [user.id]);
+      user = rows[0] || user;
+    }
+
     return user;
   },
 };

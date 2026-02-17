@@ -4,6 +4,8 @@ const productManagementController = require("./adminController/productController
 const bestSellerController = require("./adminController/bestSellerController");
 const brandSpotlightController = require("./adminController/brandSpotlightController");
 const userBrandSpotlightController = require("./userController/brandSpotlightController");
+const brandGroupController = require("./adminController/brandGroupController");
+const userBrandGroupController = require("./userController/brandGroupController");
 const adminNewArrivalController = require("./adminController/newArrivalController");
 const userNewArrivalController = require("./userController/newArrivalController");
 const uploadController = require("./uploadController");
@@ -27,8 +29,11 @@ const bannerController = require("./adminController/bannerManagementCtrl");
 const policyController = require("./adminController/policyController");
 const contactUsController = require("./contactUsController/contactUs");
 const newsLetterController = require("./newsLetterController/newsletterController");
+const stockNotifyController = require("./stockNotifyController/stockNotifyController");
 const aboutUsController = require("./adminController/aboutUsController");
 const aiSuggestionController = require("./adminController/aiSuggestionController");
+const autoMapController = require("./adminController/autoMapController");
+const accessRequestController = require("./accessRequestController");
 
 const indexCtrl = {
   userAuthController,
@@ -37,6 +42,8 @@ const indexCtrl = {
   bestSellerController,
   brandSpotlightController,
   userBrandSpotlightController,
+  brandGroupController,
+  userBrandGroupController,
   adminNewArrivalController,
   userNewArrivalController,
   uploadController,
@@ -60,8 +67,11 @@ const indexCtrl = {
   policyController,
   contactUsController,
   newsLetterController,
+  stockNotifyController,
   aboutUsController,
-  aiSuggestionController
+  aiSuggestionController,
+  autoMapController,
+  accessRequestController,
 };
 
 module.exports = indexCtrl;

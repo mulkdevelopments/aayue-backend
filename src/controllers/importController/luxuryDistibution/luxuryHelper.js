@@ -1,8 +1,7 @@
 // luxuryHelper.js
 const axios = require("axios");
 require("dotenv").config({ path: "../../../../.env" });
-const { v4: uuidv4 } = require("uuid");
-
+const { randomUUID } = require("crypto");
 // Token cache with expiry
 let cachedToken = null;
 let tokenExpiry = null;
@@ -99,7 +98,7 @@ const getLuxuryProduct = async (offset, limit, token) => {
 //     await client.query("BEGIN");
 
 //     for (const p of products) {
-//       const id = uuidv4();
+//       const id = randomUUID();
 
 //       // check duplicate by supplier_product_id
 //       const existsCheck = await client.query(
@@ -206,7 +205,7 @@ async function insertProducts(products, client) {
     await client.query("BEGIN");
 
     for (const p of products) {
-      const id = uuidv4();
+      const id = randomUUID();
 
       // check duplicate
       const exists = await client.query(

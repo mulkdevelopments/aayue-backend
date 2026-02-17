@@ -74,6 +74,20 @@ module.exports.syncIndividualLuxuryProduct = catchAsync(async (req, res, next) =
 
     // Transform product data to our format
     const transformed = transformRowToProduct(productData);
+    if (!transformed) {
+      return sendResponse(res, 200, true, "Product skipped (price below 6)", {
+        productId: productId || null,
+        vendorProductId: supplierProductId,
+        skipped: true,
+      });
+    }
+    if (require("../excludedBrands").isBrandExcluded(transformed.product?.brand_name)) {
+      return sendResponse(res, 200, true, "Product skipped (excluded brand)", {
+        productId: productId || null,
+        vendorProductId: supplierProductId,
+        skipped: true,
+      });
+    }
     const { product, variants } = transformed;
 
     // Sync the product using existing sync logic

@@ -43,7 +43,7 @@ const buildCategoryTree = (flatCategories) => {
 
 /**
  * Flatten categories tree into a list with full paths
- * Only includes leaf categories (categories with no children) for more precise mapping
+ * By default includes only leaf categories; set includeAll=true to include all nodes.
  */
 const flattenCategoriesWithPath = (categories, parentPath = "", result = [], includeAll = false) => {
   for (const cat of categories) {
@@ -69,6 +69,92 @@ const flattenCategoriesWithPath = (categories, parentPath = "", result = [], inc
   return result;
 };
 
+const normalizeText = (value) =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+const normalizeGender = (value) => {
+  const raw = normalizeText(value);
+  if (!raw) return "";
+  if (raw.includes("unisex")) return "unisex";
+  if (raw.includes("female") || raw.includes("woman") || raw.includes("women") || raw.includes("womens") || raw.includes("ladies")) return "women";
+  if (raw.includes("men") || raw.includes("man") || raw.includes("mens")) return "men";
+  if (raw.includes("boy")) return "boys";
+  if (raw.includes("girl")) return "girls";
+  if (raw.includes("kid") || raw.includes("child")) return "kids";
+  return raw;
+};
+
+const safeJsonParse = (value) => {
+  if (!value || typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    return null;
+  }
+};
+
+const getRootFromPath = (pathValue) => {
+  const raw = normalizeText(pathValue);
+  if (!raw) return "";
+  return raw.split(" ")[0];
+};
+
+const depthFromPath = (pathValue) => {
+  if (!pathValue) return 0;
+  return String(pathValue).split(">").length;
+};
+
+const isLowPriorityPath = (pathValue) => {
+  const raw = normalizeText(pathValue);
+  return (
+    raw.includes("new in") ||
+    raw.includes("what s new") ||
+    raw.includes("trending") ||
+    raw.includes("discover")
+  );
+};
+
+const buildTokenSet = (value) => {
+  const text = normalizeText(value);
+  if (!text) return new Set();
+  return new Set(text.split(" ").filter((t) => t.length > 2));
+};
+
+const scoreCandidate = (candidate, vendorInfo) => {
+  const { vendorCategory, vendorCategoryPath } = vendorInfo;
+  const candidatePath = normalizeText(candidate.path);
+  const candidateName = normalizeText(candidate.name);
+
+  let score = 0;
+
+  if (vendorCategory && candidateName.includes(normalizeText(vendorCategory))) {
+    score += 0.35;
+  }
+
+  if (vendorCategoryPath && candidatePath.includes(normalizeText(vendorCategoryPath))) {
+    score += 0.35;
+  }
+
+  const vendorTokens = buildTokenSet(`${vendorCategory} ${vendorCategoryPath}`);
+  if (vendorTokens.size > 0) {
+    const candidateTokens = buildTokenSet(candidate.path);
+    let overlap = 0;
+    vendorTokens.forEach((t) => {
+      if (candidateTokens.has(t)) overlap += 1;
+    });
+    score += Math.min(0.3, overlap / vendorTokens.size);
+  }
+
+  if (isLowPriorityPath(candidate.path)) {
+    score -= 0.25;
+  }
+
+  return Math.min(1, Math.max(0, score));
+};
+
 /**
  * Get the category tree structure as a readable string for AI context
  */
@@ -91,22 +177,35 @@ const getAICategorySuggestions = async (product, categories) => {
     // Build tree structure from flat categories (DB returns flat array with parent_id)
     const categoryTree = buildCategoryTree(categories);
 
-    // Get leaf categories only (most specific) for selection - with full paths
-    const leafCategories = flattenCategoriesWithPath(categoryTree, "", [], false);
+    // Get full category list (leaf + non-leaf) with paths
+    const allCategories = flattenCategoriesWithPath(categoryTree, "", [], true);
+    const leafCategories = allCategories.filter((c) => c.isLeaf);
 
-    // Build category list string - only leaf categories with full paths
-    const categoryListStr = leafCategories
+    // Build category list string - full paths with IDs
+    const categoryListStr = allCategories
       .map((cat) => `ID: ${cat.id} | Full Path: ${cat.path}`)
       .join("\n");
 
     // Build product info string
+    const parsedAttributes = safeJsonParse(product.attributes) || product.attributes || {};
+    const parsedMeta = safeJsonParse(product.product_meta) || product.product_meta || {};
+    const metaGender =
+      parsedMeta?.product_feature_map?.gender ||
+      parsedMeta?.gender ||
+      "";
+
     const productInfo = {
       name: product.name || "",
       title: product.title || "",
       description: product.description ? product.description.replace(/<[^>]*>/g, "").substring(0, 800) : "",
       brand: product.brand_name || "",
-      vendorCategory: product.categories?.[0]?.name || "",
-      vendorCategoryPath: product.categories?.[0]?.path || "",
+      vendorCategory: product.vendor_category_name || product.categories?.[0]?.name || "",
+      vendorCategoryPath: product.vendor_category_path || product.categories?.[0]?.path || "",
+      gender:
+        product.gender ||
+        parsedAttributes?.gender ||
+        metaGender ||
+        "",
     };
 
     // Log product info for debugging
@@ -119,40 +218,39 @@ const getAICategorySuggestions = async (product, categories) => {
     const prompt = `You are a fashion e-commerce category expert. Your task is to find the correct category for this product.
 
 ===== PRODUCT INFORMATION =====
+Product Title: "${productInfo.title || productInfo.name}"
 Product Name: "${productInfo.name}"
 Vendor Category: "${productInfo.vendorCategory}"
+Vendor Category Path: "${productInfo.vendorCategoryPath || "N/A"}"
 Brand: ${productInfo.brand}
+Gender: ${productInfo.gender || "N/A"}
 Description: ${productInfo.description || "No description available"}
 
 ===== CRITICAL: IDENTIFY THE PRODUCT TYPE =====
-LOOK AT THE PRODUCT NAME AND VENDOR CATEGORY FIRST!
+PRIORITY ORDER: TITLE FIRST, THEN DESCRIPTION,  THEN VENDOR CATEGORY 
+Note: Vendor categories can be broad. If the name/description indicates a more specific sub‑category that exists (e.g., "T‑shirt" under Topwear), choose the more specific leaf.
 
 The product name is: "${productInfo.name}"
 The vendor category is: "${productInfo.vendorCategory}"
 
 Based on these, what type of product is this?
-- If name/category contains "Jeans" → it's JEANS (clothing)
-- If name/category contains "Shirt", "T-shirt", "Tee" → it's a SHIRT (clothing)
-- If name/category contains "Dress" → it's a DRESS (clothing)
-- If name/category contains "Jacket", "Coat" → it's OUTERWEAR (clothing)
-- If name/category contains "Sneaker", "Shoe", "Boot", "Loafer" → it's SHOES
-- If name/category contains "Bag", "Tote", "Backpack" → it's a BAG
-- If name/category contains "Necklace", "Bracelet", "Ring", "Earring", "Bijoux" → it's JEWELRY
-- If name/category contains "Watch" → it's a WATCH
-- If name/category contains "Belt" → it's a BELT
 
-===== AVAILABLE CATEGORIES (LEAF NODES WITH FULL PATHS) =====
+
+===== AVAILABLE CATEGORIES (FULL PATHS, LEAF AND NON-LEAF) =====
 ${categoryListStr}
 
 ===== YOUR TASK =====
-1. First, identify the product type from the PRODUCT NAME and VENDOR CATEGORY above
+1. First, identify the product type from the PRODUCT NAME, DESCRIPTION and VENDOR CATEGORY above
 2. Then find matching categories from the available list that match this product type
 3. Return 3 suggestions - all must be for the SAME product type
 
+If you are not confident about a specific leaf category, you may suggest a parent category instead.
+You MUST choose only from the category list above. Do not invent or assume categories that are not listed.
+
 EXAMPLES:
-- Product "ICECREAM Jeans Black" with vendor category "Jeans" → suggest Jeans categories under Clothing
-- Product "Gucci Necklace Gold" with vendor category "Jewellery" → suggest Necklace categories under Accessories
-- Product "Nike Air Max" with vendor category "Sneakers" → suggest Sneaker categories under Shoes
+- Product "ICECREAM Jeans Black" → suggest Jeans categories under Clothing
+- Product "Gucci Necklace Gold"  → suggest Necklace categories under Accessories
+- Product "Canada Goose Canada Goose T-shirts and Polos Black"  → suggest Polo Shirts categories under Tops or Topwear
 
 STRICT RULES:
 - ALL 3 suggestions MUST match the actual product type
@@ -184,6 +282,78 @@ Return exactly 3 suggestions as JSON array:
 
 Return ONLY valid JSON, no other text.`;
 
+    const normalizedGender = normalizeGender(productInfo.gender);
+    const allowedRoots = normalizedGender === "men"
+      ? new Set(["menswear"])
+      : normalizedGender === "women"
+        ? new Set(["womenswear"])
+        : normalizedGender === "unisex"
+          ? new Set(["womenswear", "menswear"])
+          : normalizedGender === "kids" || normalizedGender === "boys" || normalizedGender === "girls"
+            ? new Set(["kidswear"])
+            : new Set();
+
+    const filteredCategories = allowedRoots.size
+      ? allCategories.filter((cat) => allowedRoots.has(getRootFromPath(cat.path || cat.name)))
+      : allCategories;
+
+    const filteredLeafCategories = filteredCategories.filter((c) => c.isLeaf);
+
+    const categoryListStrFiltered = filteredCategories
+      .map((cat) => `ID: ${cat.id} | Full Path: ${cat.path}`)
+      .join("\n");
+
+    const promptWithFilteredCategories = prompt.replace(
+      categoryListStr,
+      categoryListStrFiltered
+    );
+
+    // Deterministic pre-match using vendor category/path (disabled for testing)
+    /*
+    const vendorInfo = {
+      vendorCategory: productInfo.vendorCategory,
+      vendorCategoryPath: productInfo.vendorCategoryPath,
+    };
+    const preMatched = filteredCategories
+      .map((cat) => ({ ...cat, score: scoreCandidate(cat, vendorInfo) }))
+      .filter((c) => c.score > 0.2)
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return (b.depth || 0) - (a.depth || 0);
+      })
+      .slice(0, 3)
+      .map((c, idx) => ({
+        category_id: c.id,
+        category_name: c.name,
+        category_path: c.path,
+        confidence: Math.round(Math.min(95, Math.max(60, c.score * 100))),
+        reason: idx === 0
+          ? "Strong vendor category/path match"
+          : "Relevant vendor category/path match",
+      }));
+
+    if (preMatched.length > 0) {
+      return normalizedGender === "unisex"
+        ? ensureUnisexBalance(preMatched, filteredCategories)
+        : preMatched;
+    }
+    */
+
+    console.log("AI Suggestion Input:", {
+      product: {
+        id: product.id,
+        name: productInfo.name,
+        title: productInfo.title,
+        vendorCategory: productInfo.vendorCategory,
+        vendorCategoryPath: productInfo.vendorCategoryPath,
+        brand: productInfo.brand,
+        gender: productInfo.gender,
+      },
+      categoryCount: filteredCategories.length,
+      genderFilterApplied: !!allowedRoots.size,
+      promptPreview: promptWithFilteredCategories.slice(0, 2000),
+    });
+
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -191,10 +361,10 @@ Return ONLY valid JSON, no other text.`;
           role: "system",
           content: `You are a fashion product categorization expert. Your ONLY job is to match products to the correct category.
 
-CRITICAL RULE: The product name and vendor category tell you EXACTLY what the product is.
-- "Jeans" in the name = it's jeans, suggest ONLY jeans/pants categories
-- "Necklace" in the name = it's jewelry, suggest ONLY necklace categories
-- "Sneakers" in the name = it's shoes, suggest ONLY sneaker categories
+CRITICAL RULE: The product name, description and vendor category tell you EXACTLY what the product is.
+- "Jeans" in the name = it's jeans, suggest jeans/pants categories
+- "Necklace" in the name = it's jewelry, suggest necklace categories
+- "Sneakers" in the name = it's shoes, suggest sneaker categories
 
 NEVER suggest jewelry categories for clothing products.
 NEVER suggest clothing categories for jewelry products.
@@ -203,7 +373,7 @@ Respond with valid JSON only.`,
         },
         {
           role: "user",
-          content: prompt,
+          content: promptWithFilteredCategories,
         },
       ],
       temperature: 0,
@@ -211,6 +381,7 @@ Respond with valid JSON only.`,
     });
 
     const content = response.choices[0]?.message?.content || "[]";
+    console.log("AI Suggestion Raw Response:", content);
 
     // Parse the JSON response
     let suggestions;
@@ -236,25 +407,66 @@ Respond with valid JSON only.`,
 
     // Validate and enrich suggestions with category names
     const validatedSuggestions = suggestions
-      .filter((s) => s.category_id && leafCategories.some((c) => c.id === s.category_id))
+      .filter((s) => s.category_id && filteredCategories.some((c) => c.id === s.category_id))
       .map((s) => {
-        const category = leafCategories.find((c) => c.id === s.category_id);
+        const category = filteredCategories.find((c) => c.id === s.category_id);
         return {
           category_id: s.category_id,
           category_name: category?.name || "",
           category_path: category?.path || s.category_path,
           confidence: Math.min(100, Math.max(0, parseInt(s.confidence) || 0)),
           reason: s.reason || "",
+          isLeaf: category?.isLeaf ?? false,
         };
+      })
+      .filter((s) => (s.category_path ? !isLowPriorityPath(s.category_path) : true))
+      .sort((a, b) => {
+        if (a.isLeaf !== b.isLeaf) return a.isLeaf ? -1 : 1;
+        const depthDiff = depthFromPath(b.category_path) - depthFromPath(a.category_path);
+        if (depthDiff !== 0) return depthDiff;
+        return b.confidence - a.confidence;
       })
       .slice(0, 3);
 
     // If we got less than 3 valid suggestions, that's still okay
-    return validatedSuggestions;
+    return normalizedGender === "unisex"
+      ? ensureUnisexBalance(validatedSuggestions, filteredCategories)
+      : validatedSuggestions;
   } catch (error) {
     console.error("AI Category Suggestion Error:", error);
     throw error;
   }
+};
+
+const ensureUnisexBalance = (suggestions, categories) => {
+  if (!Array.isArray(suggestions)) return suggestions;
+  const women = suggestions.find((s) => getRootFromPath(s.category_path || "") === "womenswear");
+  const men = suggestions.find((s) => getRootFromPath(s.category_path || "") === "menswear");
+  if (women && men) return suggestions;
+
+  const byRoot = (root) =>
+    categories
+      .filter((c) => getRootFromPath(c.path || c.name) === root)
+      .filter((c) => !isLowPriorityPath(c.path))
+      .map((c) => ({
+        category_id: c.id,
+        category_name: c.name,
+        category_path: c.path,
+        confidence: 60,
+        reason: "Unisex product: add gender counterpart",
+      }));
+
+  const extra = [];
+  if (!women) {
+    const candidate = byRoot("womenswear")[0];
+    if (candidate) extra.push(candidate);
+  }
+  if (!men) {
+    const candidate = byRoot("menswear")[0];
+    if (candidate) extra.push(candidate);
+  }
+
+  return [...suggestions, ...extra].slice(0, 3);
 };
 
 module.exports = {

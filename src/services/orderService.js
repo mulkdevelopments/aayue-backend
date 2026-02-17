@@ -1,5 +1,5 @@
 // src/services/orderService.js
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const puppeteer = require("puppeteer");
@@ -19,7 +19,7 @@ const OrderService = {
     const YYYY = d.getFullYear();
     const MM = String(d.getMonth() + 1).padStart(2, "0");
     const DD = String(d.getDate()).padStart(2, "0");
-    const suffix = uuidv4().replace(/-/g, "").slice(0, 6).toUpperCase();
+    const suffix = randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase();
     return `ORD-${YYYY}${MM}${DD}-${suffix}`;
   },
 
@@ -52,7 +52,7 @@ const OrderService = {
       throw new Error("items required");
     if (!shipping_address) throw new Error("shipping_address required");
 
-    const orderId = uuidv4();
+    const orderId = randomUUID();
     const orderNo = this.generateOrderNo();
 
     // console.log(items, "Calculating total amount...");
@@ -118,7 +118,7 @@ const OrderService = {
       VALUES ($1,$2,$3,$4,$5,$6,$7, now())
       `,
         [
-          uuidv4(),
+          randomUUID(),
           orderId,
           it.variant_id?.id || null,
           it.qty || 1,
@@ -181,7 +181,7 @@ const OrderService = {
     //     `INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
     //      VALUES ($1,$2,$3,$4,$5, now())`,
     //     [
-    //       uuidv4(),
+    //       randomUUID(),
     //       it.variant_id,
     //       -Math.abs(it.qty || 0),
     //       "order_paid",

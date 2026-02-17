@@ -1,6 +1,5 @@
 // services/sectionService.js
-const { v4: uuidv4 } = require('uuid');
-
+const { randomUUID } = require("crypto");
 const SectionService = {
     async listAll(client) {
         const { rows } = await client.query(
@@ -38,7 +37,7 @@ const SectionService = {
             const { rows } = await client.query(sql, vals);
             return rows[0];
         } else {
-            const id = uuidv4();
+            const id = randomUUID();
             const sql = `INSERT INTO home_sections (id, key, label, active, meta, rank, created_by, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now()) RETURNING id, key, label, active, meta, rank, created_by, created_at, updated_at`;
             const vals = [id, key, label || key, active === null ? false : active, meta ? JSON.stringify(meta) : JSON.stringify({}), rank, created_by];
             const { rows } = await client.query(sql, vals);

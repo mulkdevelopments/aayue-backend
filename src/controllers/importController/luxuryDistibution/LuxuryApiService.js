@@ -1,11 +1,12 @@
 // luxuryImportService.js
 const { Pool } = require("pg");
 const pino = require("pino");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const path = require("path");
 // require("dotenv").config({ path: "../../../../.env" });
 require("dotenv").config({ path: "../../../../.env" });
 const dbPool = require("../../../db/dbConnection");
+const { normalizeBrandName } = require("../../../utils/normalize");
 // const dotenv = require("dotenv");
 
 // dotenv.config();
@@ -38,6 +39,17 @@ function toJsonb(value) {
   return JSON.stringify(value);
 }
 
+function normalizeGenderValue(value) {
+  if (!value) return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (["man", "men", "mens"].includes(normalized)) return "men";
+  if (["woman", "women", "womens", "ladies"].includes(normalized)) return "women";
+  if (["boy", "boys"].includes(normalized)) return "boys";
+  if (["girl", "girls"].includes(normalized)) return "girls";
+  if (["kids", "children", "child"].includes(normalized)) return "kids";
+  if (normalized.includes("unisex")) return "unisex";
+  return normalized;
+}
 /* -------------------------
    Price conversion helpers
    ------------------------- */
@@ -102,7 +114,7 @@ async function ensureCategoryPath(client, categoryPath) {
       continue;
     }
 
-    const id = uuidv4();
+    const id = randomUUID();
     const metadata = { created_via_import: true };
 
     const insertSql = `
@@ -166,6 +178,11 @@ function transformLuxuryProduct(api) {
     cost,
   } = api;
 
+  const vendorSalePrice = selling_price ? Number(selling_price) : null;
+  if (vendorSalePrice !== null && vendorSalePrice < 6) {
+    return null;
+  }
+
   // build size map & variants (C: per-size variants + size map in product_meta)
   const sizeQuantityMap = {};
   const variants = [];
@@ -218,7 +235,13 @@ function transformLuxuryProduct(api) {
     }
   }
 
-  const genderName = gender?.name || null;
+  const totalStock = variants.reduce(
+    (sum, variant) => sum + (Number(variant.stock) || 0),
+    0
+  );
+  const isActiveByStock = totalStock > 0;
+
+  const genderName = normalizeGenderValue(gender?.name || null);
   const season1 = season_one?.name || null;
   const season2 = season_two?.name || null;
 
@@ -282,7 +305,7 @@ function transformLuxuryProduct(api) {
     cod_available: true,
     supplier: supplier ? String(supplier) : null,
     country_of_origin: made_in || null,
-    is_active: true,
+    is_active: isActiveByStock,
   };
 
   const category_path = category_string || null;
@@ -323,7 +346,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       }
     }
 
-    let productId = existing ? existing.id : uuidv4();
+    let productId = existing ? existing.id : randomUUID();
 
     if (existing) {
       // Check if product has "our category" mapping
@@ -349,25 +372,27 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           short_description = $3,
           description = $4,
           brand_name = $5,
-          gender = $6,
+          brand_name_normalized = $6,
+          gender = $7,
           default_category_id = CASE
             WHEN default_category_id IN (
               SELECT id FROM categories WHERE is_our_category = true AND deleted_at IS NULL
             ) THEN default_category_id  -- Keep our category mapping
-            ELSE $7                      -- Update to new vendor category
+            ELSE $8                      -- Update to new vendor category
           END,
-          attributes = $8::jsonb,
-          product_meta = $9::jsonb,
-          product_img = $10,
-          product_img1 = $11,
-          product_img2 = $12,
-          product_img3 = $13,
-          product_img4 = $14,
-          product_img5 = $15,
-          supplier = $16,
-          country_of_origin = $17,
+          attributes = $9::jsonb,
+          product_meta = $10::jsonb,
+          product_img = $11,
+          product_img1 = $12,
+          product_img2 = $13,
+          product_img3 = $14,
+          product_img4 = $15,
+          product_img5 = $16,
+          supplier = $17,
+          country_of_origin = $18,
+          is_active = $19,
           updated_at = now()
-        WHERE id = $18
+        WHERE id = $20
       `,
         [
           product.name,
@@ -375,6 +400,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           product.short_description,
           product.description,
           product.brand_name,
+          normalizeBrandName(product.brand_name),
           product.gender,
           defaultCategoryId,
           toJsonb(product.attributes),
@@ -387,6 +413,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           product.product_img5,
           product.supplier,
           product.country_of_origin,
+          product.is_active !== undefined ? product.is_active : true,
           productId,
         ]
       );
@@ -396,13 +423,13 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       const insertProductSql = `
         INSERT INTO products (
           id, vendor_id, productid, product_sku, productpartnersku, name, title,
-          short_description, description, brand_name, gender, default_category_id, attributes,
+          short_description, description, brand_name, brand_name_normalized, gender, default_category_id, attributes,
           product_meta, sizechart_text, sizechart_image, shipping_returns_payments, environmental_impact,
           product_img, videos, delivery_time, cod_available, supplier, country_of_origin, is_active, created_at, updated_at
         ) VALUES (
-          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-          $13::jsonb,$14::jsonb,$15,$16,$17::jsonb,$18::jsonb,
-          $19,$20::jsonb,$21,$22,$23,$24,$25, now(), now()
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+          $14::jsonb,$15::jsonb,$16,$17,$18::jsonb,$19::jsonb,
+          $20,$21::jsonb,$22,$23,$24,$25,$26, now(), now()
         ) RETURNING id
       `;
       const vals = [
@@ -416,6 +443,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         product.short_description || null,
         product.description || null,
         product.brand_name || null,
+        normalizeBrandName(product.brand_name),
         product.gender || null,
         defaultCategoryId || null,
         toJsonb(product.attributes || null),
@@ -453,10 +481,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       const rawVendorMrp = v.vendormrp ?? null;
       const rawVendorSale = v.vendorsaleprice ?? v.price ?? null;
 
-      // Tiered markup pricing:
-      // 18% markup on products > €1000
-      // 27% markup on products €501-999
-      // 35% markup on products €1-500
+      // Tiered markup pricing: >1000 → 28%, 501–1000 → 37%, else 45%
       let ourPrice = null;
       let ourMrp = null;
 
@@ -465,11 +490,11 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         const salePrice = Number(rawVendorSale);
 
         if (salePrice > 1000) {
-          markupPercentage = 0.18;
+          markupPercentage = 0.28;
         } else if (salePrice >= 501) {
-          markupPercentage = 0.27;
+          markupPercentage = 0.37;
         } else {
-          markupPercentage = 0.35;
+          markupPercentage = 0.45;
         }
 
         ourPrice = Math.round(salePrice * (1 + markupPercentage));
@@ -535,7 +560,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         createdVariants.push({ id: vid, sku: v.sku, updated: true });
       } else {
         console.log(`         ➕ New variant - inserting`);
-        const variantId = uuidv4();
+        const variantId = randomUUID();
 
         const variantInsertText = `
           INSERT INTO product_variants (
@@ -606,7 +631,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
             INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
             VALUES ($1,$2,$3,$4,$5, now())
           `,
-            [uuidv4(), inVar.rows[0].id, v.stock, "initial_import_luxury", null]
+            [randomUUID(), inVar.rows[0].id, v.stock, "initial_import_luxury", null]
           );
         }
       }
@@ -624,7 +649,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         console.log(`   🔗 Linking product to category in product_categories table`);
         await client.query(
           "INSERT INTO product_categories (id, product_id, category_id, vendor_id) VALUES ($1,$2,$3,$4)",
-          [uuidv4(), productId, defaultCategoryId, LUXURY_VENDOR_ID]
+          [randomUUID(), productId, defaultCategoryId, LUXURY_VENDOR_ID]
         );
       }
     }
@@ -649,7 +674,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
         await client.query(
           "INSERT INTO product_dynamic_filters (id, product_id, filter_type, filter_name, vendor_id) VALUES ($1,$2,$3,$4,$5)",
           [
-            uuidv4(),
+            randomUUID(),
             productId,
             df.filter_type,
             df.filter_name,
@@ -685,7 +710,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       );
       if (exist.length > 0) return exist[0].id;
 
-      const mediaId = uuidv4();
+      const mediaId = randomUUID();
       await client.query(
         `INSERT INTO media (id, name, variant_id, url, type, metadata, created_at)
          VALUES ($1,$2,$3,$4,$5,$6, now())`,
@@ -861,6 +886,12 @@ async function syncLuxuryProducts(jobId) {
       for (const item of data) {
         try {
           const transformed = transformLuxuryProduct(item);
+          if (!transformed) {
+            continue;
+          }
+          if (require("../excludedBrands").isBrandExcluded(transformed.product?.brand_name)) {
+            continue;
+          }
           await upsertProductAndVariant(client, transformed, {});
           // Track synced product SKU
           if (transformed.product.product_sku) {

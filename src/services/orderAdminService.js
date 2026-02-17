@@ -1,6 +1,5 @@
 // services/orderAdminService.js
-const { v4: uuidv4 } = require("uuid");
-
+const { randomUUID } = require("crypto");
 const OrderAdminService = {
   /**
    * listOrders - admin listing with filters & pagination
@@ -699,7 +698,7 @@ LIMIT 1;
       await client.query(
         `INSERT INTO audit_logs (id, table_name, record_id, action, payload, performed_by, created_at) VALUES ($1,$2,$3,$4,$5,$6, now())`,
         [
-          uuidv4(),
+          randomUUID(),
           "orders",
           order_id,
           "admin_update_status",

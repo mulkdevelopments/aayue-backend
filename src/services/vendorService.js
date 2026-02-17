@@ -1,7 +1,6 @@
 const dbPool = require("../db/dbConnection");
 const AppError = require("../errorHandling/AppError");
-const { v4: uuidv4 } = require("uuid");
-
+const { randomUUID } = require("crypto");
 const VendorService = {
   async getAllVendors(client, { status, page, search }) {
     let sql = "SELECT * FROM vendors WHERE 1=1"; // Base query

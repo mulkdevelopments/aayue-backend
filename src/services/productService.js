@@ -1,5 +1,5 @@
 // services/productService.js
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const { Client } = require("@elastic/elasticsearch");
 
 
@@ -83,7 +83,7 @@ const ProductService = {
       category_ids = [],
       dynamic_filters = [],
     } = productData;
-    const productId = uuidv4();
+    const productId = randomUUID();
 
     // === Product INSERT ===
     const productInsertText = `
@@ -150,7 +150,7 @@ const ProductService = {
     // === Variant INSERT (placeholders and values strictly matched) ===
     const createdVariants = [];
     for (const v of variants) {
-      const variantId = uuidv4();
+      const variantId = randomUUID();
 
       const variantInsertText = `
         INSERT INTO product_variants (
@@ -219,7 +219,7 @@ const ProductService = {
         await client.query(
           `INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
            VALUES ($1,$2,$3,$4,$5, now())`,
-          [uuidv4(), variantId, v.stock, "initial_stock", null]
+          [randomUUID(), variantId, v.stock, "initial_stock", null]
         );
       }
     }
@@ -228,7 +228,7 @@ const ProductService = {
     const createdProductCategories = [];
     if (Array.isArray(category_ids) && category_ids.length > 0) {
       for (const catId of category_ids) {
-        const mappingId = uuidv4();
+        const mappingId = randomUUID();
         await client.query(
           `INSERT INTO product_categories (id, product_id, category_id) VALUES ($1,$2,$3)`,
           [mappingId, productId, catId]
@@ -245,7 +245,7 @@ const ProductService = {
     const createdDynamicFilters = [];
     if (Array.isArray(dynamic_filters) && dynamic_filters.length > 0) {
       for (const df of dynamic_filters) {
-        const dfId = uuidv4();
+        const dfId = randomUUID();
         await client.query(
           `INSERT INTO product_dynamic_filters (id, product_id, filter_type, filter_name) VALUES ($1,$2,$3,$4)`,
           [dfId, productId, df.filter_type, df.filter_name]
@@ -306,7 +306,7 @@ const ProductService = {
                 p.name ILIKE $${idx} OR
                 p.title ILIKE $${idx + 1} OR
                 p.description ILIKE $${idx + 2} OR
-                p.brand_name ILIKE $${idx + 3} OR
+          p.brand_name_normalized ILIKE $${idx + 3} OR
                 EXISTS (
                   SELECT 1 FROM product_variants pv_search
                   WHERE pv_search.product_id = p.id
@@ -346,7 +346,7 @@ const ProductService = {
 
     if (gender) {
       params.push(gender);
-      whereClauses.push(`p.gender = $${idx}`);
+      whereClauses.push(`LOWER(p.gender) = LOWER($${idx})`);
       idx++;
     }
 
@@ -434,10 +434,36 @@ const ProductService = {
       ? `WHERE ${whereClauses.join(" AND ")}`
       : "";
 
-    // ----------------- FAST COUNT on filtered products -----------------
+    // ----------------- FAST COUNTS on filtered products -----------------
     const countSQL = `SELECT COUNT(*)::int AS total FROM products p ${whereSQL}`;
-    const countRes = await client.query(countSQL, params);
+    const mappedCountSQL = `
+      SELECT COUNT(*)::int AS total
+      FROM products p
+      ${whereSQL}
+      AND EXISTS (
+        SELECT 1
+        FROM product_our_category_map pom
+        JOIN categories c ON c.id = pom.our_category_id
+        WHERE pom.product_id = p.id
+          AND c.deleted_at IS NULL
+      )
+    `;
+    const inactiveCountSQL = `
+      SELECT COUNT(*)::int AS total
+      FROM products p
+      ${whereSQL}
+      AND p.is_active = false
+    `;
+
+    const [countRes, mappedRes, inactiveRes] = await Promise.all([
+      client.query(countSQL, params),
+      client.query(mappedCountSQL, params),
+      client.query(inactiveCountSQL, params),
+    ]);
+
     const total = parseInt(countRes.rows[0].total, 10) || 0;
+    const mappedTotal = parseInt(mappedRes.rows[0].total, 10) || 0;
+    const inactiveTotal = parseInt(inactiveRes.rows[0].total, 10) || 0;
     if (total === 0) return { total: 0, products: [] };
 
     // ----------------- SELECT filtered product IDs (with ordering) -----------------
@@ -609,7 +635,7 @@ const ProductService = {
       variant_count: Number(r.variant_count || 0),
     }));
 
-    return { total, products };
+    return { total, mappedTotal, inactiveTotal, products };
   },
 
   //Impleted Elastic Search
@@ -777,11 +803,14 @@ const ProductService = {
  
      // ✅ Other filters (same as before)
  
-     if (brands.length > 0) {
-       params.push(brands.map(b => b.toLowerCase()));
-       whereClauses.push(`LOWER(TRIM(p.brand_name)) = ANY($${idx}::text[])`);
-       idx++;
-     }
+    if (brands.length > 0) {
+      const normalizedBrands = brands
+        .map((b) => String(b).trim().replace(/\s+/g, " ").toLowerCase())
+        .filter(Boolean);
+      params.push(normalizedBrands);
+      whereClauses.push(`p.brand_name_normalized = ANY($${idx}::text[])`);
+      idx++;
+    }
  
      if (vendor_id) {
        params.push(vendor_id);
@@ -797,11 +826,11 @@ const ProductService = {
        idx++;
      }
  
-     if (gender) {
-       params.push(gender);
-       whereClauses.push(`p.gender = $${idx}`);
-       idx++;
-     }
+    if (gender) {
+      params.push(gender);
+      whereClauses.push(`LOWER(p.gender) = LOWER($${idx})`);
+      idx++;
+    }
  
      if (country) {
        params.push(country);
@@ -993,7 +1022,6 @@ const ProductService = {
     const params = [];
     let idx = 1;
 
-    let vendorCategoryIds = [];
     let ourCatIds = [];
     let ourCategoryProductsExist = false;
 
@@ -1018,30 +1046,6 @@ const ProductService = {
 
       ourCatIds = ourCatsRes.rows.map((r) => r.id);
 
-      const vendorMapped = await client.query(
-        `SELECT id FROM categories WHERE is_our_category = FALSE AND deleted_at IS NULL AND our_category = ANY($1)`,
-        [ourCatIds]
-      );
-      const mappedVendorIds = vendorMapped.rows.map((r) => r.id);
-
-      if (mappedVendorIds.length > 0) {
-        const vendorDescRes = await client.query(
-          `
-          WITH RECURSIVE vendor_desc AS (
-              SELECT id FROM categories WHERE id = ANY($1)
-              UNION ALL
-              SELECT c.id
-              FROM categories c
-              JOIN vendor_desc vd ON c.parent_id = vd.id
-              WHERE c.deleted_at IS NULL
-          )
-          SELECT DISTINCT id FROM vendor_desc;
-          `,
-          [mappedVendorIds]
-        );
-        vendorCategoryIds = vendorDescRes.rows.map((r) => r.id);
-      }
-
       const directMapCheck = await client.query(
         `SELECT COUNT(*)::int AS count FROM product_our_category_map WHERE our_category_id = ANY($1)`,
         [ourCatIds]
@@ -1050,35 +1054,16 @@ const ProductService = {
     }
 
     // ✅ Combine category filters
-    if (vendorCategoryIds.length > 0 || ourCategoryProductsExist) {
-      const combinedClauseParts = [];
-
-      if (vendorCategoryIds.length > 0) {
-        params.push(vendorCategoryIds);
-        combinedClauseParts.push(`
-          EXISTS (
-              SELECT 1 FROM product_categories pc
-              WHERE pc.product_id = p.id
-                AND pc.category_id = ANY($${idx}::uuid[])
-                AND pc.deleted_at IS NULL
-          )
-        `);
-        idx++;
-      }
-
-      if (ourCategoryProductsExist) {
-        params.push(ourCatIds);
-        combinedClauseParts.push(`
-          EXISTS (
-              SELECT 1 FROM product_our_category_map pom
-              WHERE pom.product_id = p.id
-                AND pom.our_category_id = ANY($${idx}::uuid[])
-          )
-        `);
-        idx++;
-      }
-
-      whereClauses.push(`(${combinedClauseParts.join(" OR ")})`);
+    if (ourCategoryProductsExist) {
+      params.push(ourCatIds);
+      whereClauses.push(`
+        EXISTS (
+          SELECT 1 FROM product_our_category_map pom
+          WHERE pom.product_id = p.id
+            AND pom.our_category_id = ANY($${idx}::uuid[])
+        )
+      `);
+      idx++;
     } else if (category_id) {
       return { total: 0, products: [] };
     }
@@ -1091,15 +1076,17 @@ const ProductService = {
         p.name ILIKE $${idx} OR
         p.title ILIKE $${idx + 1} OR
         p.description ILIKE $${idx + 2} OR
-        p.brand_name ILIKE $${idx + 3} OR
+        p.brand_name_normalized ILIKE $${idx + 3} OR
         EXISTS (
             SELECT 1 FROM product_variants pv_s
             WHERE pv_s.product_id = p.id AND pv_s.sku ILIKE $${idx + 4}
         ) OR
         EXISTS (
-            SELECT 1 FROM product_categories pc_s
-            JOIN categories c_s ON c_s.id = pc_s.category_id
-            WHERE pc_s.product_id = p.id AND c_s.name ILIKE $${idx + 5}
+            SELECT 1 FROM product_our_category_map pom_s
+            JOIN categories c_s ON c_s.id = pom_s.our_category_id
+            WHERE pom_s.product_id = p.id
+              AND c_s.deleted_at IS NULL
+              AND c_s.name ILIKE $${idx + 5}
         )
       )`);
       idx += 6;
@@ -1107,8 +1094,11 @@ const ProductService = {
 
     // ✅ Other filters
     if (brands.length > 0) {
-      params.push(brands.map(b => b.toLowerCase()));
-      whereClauses.push(`LOWER(TRIM(p.brand_name)) = ANY($${idx}::text[])`);
+      const normalizedBrands = brands
+        .map((b) => String(b).trim().replace(/\s+/g, " ").toLowerCase())
+        .filter(Boolean);
+      params.push(normalizedBrands);
+      whereClauses.push(`p.brand_name_normalized = ANY($${idx}::text[])`);
       idx++;
     }
 
@@ -1128,7 +1118,7 @@ const ProductService = {
 
     if (gender) {
       params.push(gender);
-      whereClauses.push(`p.gender = $${idx}`);
+      whereClauses.push(`LOWER(p.gender) = LOWER($${idx})`);
       idx++;
     }
 
@@ -1178,7 +1168,12 @@ const ProductService = {
         EXISTS (
             SELECT 1 FROM product_variants pv
             WHERE pv.product_id = p.id
-              AND (pv.variant_size = ANY($${idx}::text[]) OR pv.attributes->>'size' = ANY($${idx}::text[]))
+              AND (
+                pv.normalized_size_final = ANY($${idx}::text[])
+                OR pv.normalized_size = ANY($${idx}::text[])
+                OR pv.variant_size = ANY($${idx}::text[])
+                OR pv.attributes->>'size' = ANY($${idx}::text[])
+              )
         )
       `);
       idx++;
@@ -1247,6 +1242,8 @@ const ProductService = {
           jsonb_agg(DISTINCT m.*)  FILTER (WHERE m.id IS NOT NULL) AS media,
           jsonb_agg(DISTINCT jsonb_build_object('id', c.id, 'name', c.name, 'slug', c.slug, 'path', c.path))
               FILTER (WHERE c.id IS NOT NULL) AS categories,
+          jsonb_agg(DISTINCT jsonb_build_object('id', mc.id, 'name', mc.name, 'slug', mc.slug, 'path', mc.path))
+              FILTER (WHERE mc.id IS NOT NULL) AS mapped_categories,
           jsonb_agg(DISTINCT jsonb_build_object('filter_type', pdf.filter_type, 'filter_name', pdf.filter_name))
               FILTER (WHERE pdf.id IS NOT NULL) AS dynamic_filters
       FROM products p
@@ -1254,6 +1251,8 @@ const ProductService = {
       LEFT JOIN media m ON m.variant_id = pv.id AND m.deleted_at IS NULL
       LEFT JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
       LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
+      LEFT JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN categories mc ON mc.id = pom.our_category_id AND mc.deleted_at IS NULL
       LEFT JOIN product_dynamic_filters pdf ON pdf.product_id = p.id AND pdf.deleted_at IS NULL
       WHERE p.id = ANY($1)
       AND p.is_active = TRUE
@@ -1474,7 +1473,8 @@ const ProductService = {
         'id', c.id,
         'name', c.name,
         'slug', c.slug,
-        'path', c.path
+        'path', c.path,
+        'is_our_category', c.is_our_category
       )) FILTER (WHERE c.id IS NOT NULL), '[]') AS categories,
 
       COALESCE(jsonb_agg(DISTINCT jsonb_build_object(
@@ -1487,13 +1487,7 @@ const ProductService = {
     LEFT JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
     LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
     LEFT JOIN product_dynamic_filters pdf ON pdf.product_id = p.id AND pdf.deleted_at IS NULL
-    LEFT JOIN vendors v ON v.id = (
-      SELECT DISTINCT c2.vendor_id
-      FROM product_categories pc2
-      INNER JOIN categories c2 ON c2.id = pc2.category_id
-      WHERE pc2.product_id = p.id AND pc2.deleted_at IS NULL
-      LIMIT 1
-    )
+    LEFT JOIN vendors v ON v.id = p.vendor_id AND v.deleted_at IS NULL
 
     WHERE p.deleted_at IS NULL AND p.is_active = TRUE AND p.id = $1
 
@@ -1981,27 +1975,68 @@ const ProductService = {
     }
   },
 
-  async getAllBrands(search, client) {
+  async getAllBrands(search, categorySlug, client) {
+    const params = [];
+    let cte = "";
+    let categoryFilter = "";
+
+    if (categorySlug) {
+      params.push(categorySlug);
+      cte = `
+        WITH RECURSIVE our_subtree AS (
+          SELECT id
+          FROM categories
+          WHERE slug = $1 AND is_our_category = true AND deleted_at IS NULL
+          UNION ALL
+          SELECT c.id
+          FROM categories c
+          INNER JOIN our_subtree os ON c.parent_id = os.id
+          WHERE c.deleted_at IS NULL
+        )
+      `;
+      categoryFilter = `
+        AND EXISTS (
+          SELECT 1
+          FROM product_our_category_map pom
+          JOIN our_subtree os ON os.id = pom.our_category_id
+          WHERE pom.product_id = p.id
+        )
+      `;
+    }
+
+    const baseSql = `
+      ${cte}
+      SELECT
+        p.brand_name_normalized,
+        MIN(p.brand_name) AS brand_name
+      FROM products p
+      LEFT JOIN vendors v ON v.id = p.vendor_id
+      WHERE p.deleted_at IS NULL
+        AND p.is_active = TRUE
+        AND (v.status = 'active' OR p.vendor_id IS NULL)
+        AND p.brand_name_normalized IS NOT NULL
+        ${categoryFilter}
+    `;
+
     if (search && search.length > 0) {
+      const term = `%${String(search).trim().replace(/\s+/g, " ").toLowerCase()}%`;
+      const termParamIndex = params.length + 1;
+      params.push(term);
       const { rows } = await client.query(
-        `SELECT DISTINCT p.brand_name
-         FROM products p
-         LEFT JOIN vendors v ON v.id = p.vendor_id
-         WHERE p.deleted_at IS NULL
-           AND p.brand_name ILIKE $1
-           AND (v.status = 'active' OR p.vendor_id IS NULL)
-         ORDER BY p.brand_name ASC`,
-        [`%${search}%`]
+        `${baseSql}
+         AND p.brand_name_normalized ILIKE $${termParamIndex}
+         GROUP BY p.brand_name_normalized
+         ORDER BY p.brand_name_normalized ASC`,
+        params
       );
       return rows;
     }
+
     const { rows } = await client.query(
-      `SELECT DISTINCT p.brand_name
-       FROM products p
-       LEFT JOIN vendors v ON v.id = p.vendor_id
-       WHERE p.deleted_at IS NULL
-         AND (v.status = 'active' OR p.vendor_id IS NULL)
-       ORDER BY p.brand_name ASC`
+      `${baseSql}
+       GROUP BY p.brand_name_normalized
+       ORDER BY p.brand_name_normalized ASC`,
+      params
     );
     return rows;
   },

@@ -1,4 +1,4 @@
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const AppError = require("../errorHandling/AppError");
 
 const VendorSyncJobService = {
@@ -6,7 +6,7 @@ const VendorSyncJobService = {
    * Create a new sync job
    */
   async createSyncJob(client, { vendorId, startedBy = null, metadata = {} }) {
-    const jobId = uuidv4();
+    const jobId = randomUUID();
 
     const query = `
       INSERT INTO vendor_sync_jobs (

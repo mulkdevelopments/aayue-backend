@@ -1,9 +1,8 @@
 // services/brandSpotlightService.js
-const { v4: uuidv4 } = require('uuid');
-
+const { randomUUID } = require("crypto");
 const BrandSpotlightService = {
     async createSpotlight(payload, client) {
-        const id = uuidv4();
+        const id = randomUUID();
         const sql = `
       INSERT INTO brand_spotlights
         (id, brand_name, vendor_id, meta, rank, active, start_at, end_at, created_by, created_at, updated_at)

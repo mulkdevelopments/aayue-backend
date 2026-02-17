@@ -31,6 +31,17 @@ function stripStars(val) {
     return String(val).replace(/\*/g, '').trim();
 }
 
+function normalizeGenderValue(value) {
+    if (!value) return null;
+    const normalized = String(value).trim().toLowerCase();
+    if (['man', 'men', 'mens'].includes(normalized)) return 'men';
+    if (['woman', 'women', 'womens', 'ladies'].includes(normalized)) return 'women';
+    if (['boy', 'boys'].includes(normalized)) return 'boys';
+    if (['girl', 'girls'].includes(normalized)) return 'girls';
+    if (['kids', 'children', 'child'].includes(normalized)) return 'kids';
+    if (normalized.includes('unisex')) return 'unisex';
+    return normalized;
+}
 // Map one CSV row into our internal product/variants shape
 // Source headers include (examples):
 // supplier_product_id, brand, year, variant, color_detail, color_supplier, made_in, material,
@@ -45,7 +56,8 @@ function transformRowToProduct(row) {
     const genderObj = safeJsonParse(row.gender, null);
     const seasonOne = (safeJsonParse(row.season_one, null) || {}).name || row.season_one || null;
     const seasonTwo = (safeJsonParse(row.season_two, null) || {}).name || row.season_two || null;
-    const genderName = (genderObj && genderObj.name) ? genderObj.name : row.gender?.name || row.gender || null;
+    const genderNameRaw = (genderObj && genderObj.name) ? genderObj.name : row.gender?.name || row.gender || null;
+    const genderName = normalizeGenderValue(genderNameRaw);
 
     const productSku = row.sku ? String(row.sku).trim() : null;
     const supplierProductId = row.supplier_product_id ? String(row.supplier_product_id).trim() : null;
@@ -107,22 +119,22 @@ function transformRowToProduct(row) {
     const vendorMrp = row.original_price ? Number(row.original_price) : null;
     const vendorSalePrice = row.selling_price ? Number(row.selling_price) : null;
 
-    // Calculate our prices with tiered markup based on vendor sale price
-    // 10% markup on products > €1000
-    // 15% markup on products €501-999
-    // 20% markup on products €1-500
+    // Calculate our prices with tiered markup: >1000 → 28%, 501–1000 → 37%, else 45%
     let ourPrice = null;
     let ourMrp = null;
 
+    if (vendorSalePrice !== null && vendorSalePrice < 6) {
+        return null;
+    }
     if (vendorSalePrice && vendorSalePrice > 0) {
         let markupPercentage;
 
         if (vendorSalePrice > 1000) {
-            markupPercentage = 0.18; // 10% markup
+            markupPercentage = 0.28;
         } else if (vendorSalePrice >= 501) {
-            markupPercentage = 0.27; // 15% markup
+            markupPercentage = 0.37;
         } else {
-            markupPercentage = 0.35; // 20% markup
+            markupPercentage = 0.45;
         }
 
         ourPrice = Math.round(vendorSalePrice * (1 + markupPercentage));
@@ -207,6 +219,12 @@ function transformRowToProduct(row) {
             is_active: true,
         });
     }
+
+    const totalStock = variants.reduce(
+        (sum, variant) => sum + (Number(variant.stock) || 0),
+        0
+    );
+    product.is_active = totalStock > 0;
 
     // Category from "Women > Accessories > Lifestyle"
     const category_path = (row.category_string || '').trim() || null;

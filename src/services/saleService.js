@@ -1,9 +1,8 @@
 // // services/saleService.js
-// const { v4: uuidv4 } = require('uuid');
-
+// const { randomUUID } = require("crypto");
 // const SaleService = {
 //     async createSale({ product_id, rank = null, meta = {}, active = true, start_at = null, end_at = null, created_by = null }, client) {
-//         const id = uuidv4();
+//         const id = randomUUID();
 //         const sql = `
 //       INSERT INTO sales (id, product_id, rank, meta, active, start_at, end_at, created_by, created_at, updated_at)
 //       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8, now(), now())
@@ -128,12 +127,12 @@
 
 
 // services/saleService.js
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require("crypto");
 const { update } = require('../controllers/adminController/newArrivalController');
 
 const SaleService = {
     async createSaleByCategory({ image_url, redirect_url, title, button_text, created_by = null }, client) {
-        const id = uuidv4();
+        const id = randomUUID();
         const sql = `
       INSERT INTO sale_by_category (id, image_url, redirect_url, title, button_text, created_by, created_at, updated_at)
       VALUES ($1,$2,$3,$4,$5,$6, now(), now())
@@ -180,7 +179,7 @@ const SaleService = {
     },
 
     async createSale({ product_id, discount_percent = 0, rank = null, meta = {}, active = true, start_at = null, end_at = null, created_by = null }, client) {
-        const id = uuidv4();
+        const id = randomUUID();
         const sql = `
       INSERT INTO sales (id, product_id, rank, meta, discount_percent, active, start_at, end_at, created_by, created_at, updated_at)
       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9, now(), now())

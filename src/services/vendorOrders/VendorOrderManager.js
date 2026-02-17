@@ -227,6 +227,7 @@ class VendorOrderManager {
             WHERE id = ANY($1::uuid[])
           `, [itemIds]);
 
+          console.error(`   ❌ [${vendorData.vendorName}] Order placement failed: ${result.message}`);
           console.log(`\n   ❌ Marked ${itemIds.length} items as failed\n`);
 
           results.push({

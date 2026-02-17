@@ -150,27 +150,45 @@ class LuxuryDistributionService extends BaseVendorService {
 
     // Step 2: Transform shipping address using proper country/region mapping
     const addr = shippingAddress;
+    const addrCountry = String(addr.country || "").toLowerCase().trim();
+    const isPakistan =
+      addrCountry === "pk" || addrCountry === "pakistan" || addrCountry === "pak";
+
+    const maskedAddress = {
+      street: ["TTEN", "Palace Towers", "7th Floor 706", "Dubai Silicon Oasis"],
+      city: "Dubai",
+      state: "Dubai",
+      postal_code: "00000",
+      country: "AE",
+    };
+    const effectiveAddress = isPakistan ? maskedAddress : addr;
 
     // Get proper country code (handle both codes and full names)
-    const countryCode = getCountryCode(addr.country);
+    const countryCode = getCountryCode(effectiveAddress.country);
 
     // Build ISO region code (e.g., "AE-DU" for Dubai, UAE)
-    const regionCode = buildRegionCode(addr.country, addr.state);
+    const regionCode = buildRegionCode(
+      effectiveAddress.country,
+      effectiveAddress.state
+    );
 
     // Normalize phone number
     const telephone = normalizePhoneNumber(addr.mobile || customer.phone);
+    const email = isPakistan ? "admin@aayeu.com" : customer.email;
 
     // Step 3: Build LD payload
     return {
       address: {
         region_code: regionCode,
         country_id: countryCode,
-        street: [addr.street, addr.street2].filter(Boolean),
-        postcode: addr.postal_code || '00000',
-        city: addr.city || 'N/A',
+        street: Array.isArray(effectiveAddress.street)
+          ? effectiveAddress.street.filter(Boolean)
+          : [effectiveAddress.street, effectiveAddress.street2].filter(Boolean),
+        postcode: effectiveAddress.postal_code || "00000",
+        city: effectiveAddress.city || "N/A",
         firstname: customer.firstName || customer.full_name?.split(' ')[0] || 'Customer',
         lastname: customer.lastName || customer.full_name?.split(' ').slice(1).join(' ') || '',
-        email: customer.email,
+        email,
         telephone
       },
       products

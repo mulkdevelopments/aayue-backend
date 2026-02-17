@@ -1,8 +1,7 @@
 const dbPool = require("../db/dbConnection");
 const categoryQueries = require("../dbQueries/categoryQueries");
 const AppError = require("../errorHandling/AppError");
-const { v4: uuidv4 } = require("uuid");
-
+const { randomUUID } = require("crypto");
 const CategoryService = {
     // fetch category by id (useful for validation)
     async getCategoryById(id, client) {
@@ -18,7 +17,7 @@ const CategoryService = {
     //
     // returns created category row.
     async createCategory({ name, slug, parent_id = null, metadata = null, is_active = true, is_our_category = false, our_category = null, priority, image_url }, client) {
-        const id = uuidv4();
+        const id = randomUUID();
 
         if (parent_id) {
             const { rows: parentRows } = await client.query(categoryQueries.getById, [parent_id]);
@@ -240,6 +239,16 @@ const CategoryService = {
                     [id]
                 );
                 deletedRows = dr;
+            }
+
+            // Remove product mappings that point to deleted categories
+            if (deletedRows.length > 0) {
+                const deletedIds = deletedRows.map((row) => row.id);
+                await client.query(
+                    `DELETE FROM product_our_category_map
+       WHERE our_category_id = ANY($1::uuid[])`,
+                    [deletedIds]
+                );
             }
 
             // Unmap vendor categories that mapped to this our-category

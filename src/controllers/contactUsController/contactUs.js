@@ -1,6 +1,6 @@
 const AppError = require("../../errorHandling/AppError");
 const catchAsync = require("../../errorHandling/catchAsync");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const db = require("../../db/dbConnection");
 const sendResponse = require("../../utils/sendResponse");
 
@@ -13,7 +13,7 @@ module.exports.createContactMessage = catchAsync(async (req, res, next) => {
         return next(new AppError("first_name, last_name, email & message are required", 400));
     }
 
-    const id = uuidv4();
+    const id = randomUUID();
 
     const sql = `
         INSERT INTO contact_messages 

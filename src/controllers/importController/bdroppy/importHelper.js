@@ -1,5 +1,5 @@
 // importHelpers.js
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require("crypto");
 const slugifyLib = require('slugify');
 
 /**
@@ -109,7 +109,7 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
             const barcodeRaw = get(m, 'picture 1 blob') || get(m, 'barcode') || get(m, 'model_id') || null;
             const barcode = barcodeRaw ? String(barcodeRaw).replace(/\s+/g, '') : null;
 
-            const skuCandidate = get(m, 'model_id') || get(m, 'model_id') || `${product.product_sku || product.productid}-${m['model_id'] || uuidv4()}`;
+            const skuCandidate = get(m, 'model_id') || get(m, 'model_id') || `${product.product_sku || product.productid}-${m['model_id'] || randomUUID()}`;
 
             const v = {
                 sku: skuCandidate || null,
@@ -135,7 +135,7 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
         }
     } else {
         // no model rows: create one variant from productRow
-        const sku = get(productRow, 'code') || get(productRow, 'product_id') || uuidv4();
+        const sku = get(productRow, 'code') || get(productRow, 'product_id') || randomUUID();
         const v = {
             sku,
             price: (parseFloat(get(productRow, 'sell_price')) || null),
@@ -188,7 +188,7 @@ function transformRowToProduct(row) {
             is_active: true
         };
         const variant = {
-            sku: String(row['model_id'] || uuidv4()).trim(),
+            sku: String(row['model_id'] || randomUUID()).trim(),
             price: null,
             mrp: null,
             sale_price: null,

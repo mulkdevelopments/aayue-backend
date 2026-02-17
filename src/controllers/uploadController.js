@@ -3,8 +3,16 @@ const cloudinary = require("../config/cloudinary");
 const streamifier = require("streamifier");
 const sendResponse = require("../utils/sendResponse");
 const catchAsync = require("../errorHandling/catchAsync");
-const pLimit = require("p-limit").default;
 const util = require("util");
+
+let pLimit = null;
+const getPLimit = async () => {
+    if (!pLimit) {
+        const mod = await import("p-limit");
+        pLimit = mod.default || mod;
+    }
+    return pLimit;
+};
 
 // optional: try to require sharp for resizing (not required)
 let sharp = null;
@@ -93,7 +101,7 @@ module.exports.uploadProductImages = async (req, res) => {
             return sendResponse(res, 400, false, "No images uploaded");
         }
 
-        const limit = pLimit(CONCURRENCY);
+        const limit = (await getPLimit())(CONCURRENCY);
 
         // map each file to a limited task that optionally resizes then retries upload
         const tasks = req.files.map((file) =>
@@ -146,7 +154,7 @@ module.exports.uploadHeroImages = catchAsync(async (req, res, next) => {
             return sendResponse(res, 400, false, "No images uploaded");
         }
 
-        const limit = pLimit(CONCURRENCY);
+        const limit = (await getPLimit())(CONCURRENCY);
 
         const tasks = req.files.map((file) =>
             limit(async () => {
@@ -229,7 +237,7 @@ module.exports.uploadBanners = catchAsync(async (req, res, next) => {
             return sendResponse(res, 400, false, 'No files uploaded');
         }
 
-        const limit = pLimit(CONCURRENCY);
+        const limit = (await getPLimit())(CONCURRENCY);
 
         const tasks = req.files.map((file) =>
             limit(async () => {

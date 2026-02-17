@@ -217,7 +217,7 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
       },
     };
 
-    const { total, products } = await ProductService.getProducts(
+    const { total, mappedTotal, inactiveTotal, products } = await ProductService.getProducts(
       options,
       client
     );
@@ -226,6 +226,8 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
 
     return sendResponse(res, 200, true, "Products fetched", {
       total,
+      mapped_total: mappedTotal,
+      inactive_total: inactiveTotal,
       page,
       limit,
       total_pages: totalPages,
@@ -1159,6 +1161,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       brand,
       size,
       color,
+      gender,
       min_price,
       max_price,
       q,
@@ -1174,13 +1177,15 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     const brands = Array.isArray(brand) ? brand : brand ? [brand] : [];
     const sizes = Array.isArray(size) ? size : size ? [size] : [];
     const colors = Array.isArray(color) ? color : color ? [color] : [];
+    const genders = Array.isArray(gender) ? gender : gender ? [gender] : [];
 
-    /** STEP-1: Resolve mapped vendor category IDs */
-    let vendorCategoryIds = [];
+    let ourCatIds = [];
+    let ourCategoryProductsExist = false;
 
     if (category_id) {
-      const ourCats = await client.query(
-        `
+      ourCatIds = await client
+        .query(
+          `
           WITH RECURSIVE our_subtree AS (
               SELECT id FROM categories WHERE id = $1 AND deleted_at IS NULL
               UNION ALL
@@ -1190,34 +1195,16 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
           )
           SELECT id FROM our_subtree;
         `,
-        [category_id]
-      );
+          [category_id]
+        )
+        .then((res) => res.rows.map((r) => r.id));
 
-      const ourCatIds = ourCats.rows.map((r) => r.id);
-
-      const vendorMapped = await client.query(
-        `SELECT id FROM categories WHERE is_our_category = false AND deleted_at IS NULL AND our_category = ANY($1)`,
-        [ourCatIds]
-      );
-
-      const mappedVendorIds = vendorMapped.rows.map((r) => r.id);
-
-      if (mappedVendorIds.length > 0) {
-        const vendorDesc = await client.query(
-          `
-            WITH RECURSIVE vendor_descendants AS (
-                SELECT id FROM categories WHERE id = ANY($1)
-                UNION ALL
-                SELECT c.id FROM categories c
-                JOIN vendor_descendants vd ON c.parent_id = vd.id
-                WHERE c.deleted_at IS NULL
-            )
-            SELECT DISTINCT id FROM vendor_descendants;
-          `,
-          [mappedVendorIds]
+      if (ourCatIds.length > 0) {
+        const directMapCheck = await client.query(
+          `SELECT COUNT(*)::int AS count FROM product_our_category_map WHERE our_category_id = ANY($1)`,
+          [ourCatIds]
         );
-
-        vendorCategoryIds = vendorDesc.rows.map((r) => r.id);
+        ourCategoryProductsExist = directMapCheck.rows[0].count > 0;
       }
     }
 
@@ -1228,12 +1215,24 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
         SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active'
       ))`;
 
-    if (vendorCategoryIds.length > 0) {
-      baseParams.push(vendorCategoryIds);
-      baseWhere += ` AND EXISTS (
-            SELECT 1 FROM product_categories pc
-            WHERE pc.product_id = p.id AND pc.category_id = ANY($${baseParams.length})
-        )`;
+    if (ourCategoryProductsExist) {
+      baseParams.push(ourCatIds);
+      baseWhere += `
+        AND EXISTS (
+          SELECT 1 FROM product_our_category_map pom
+          WHERE pom.product_id = p.id
+            AND pom.our_category_id = ANY($${baseParams.length}::uuid[])
+        )
+      `;
+    } else if (category_id) {
+      return sendResponse(res, 200, true, "Filters fetched", {
+        brands: [],
+        colors: [],
+        sizes: [],
+        genders: [],
+        price: { min: 0, max: 0 },
+        child_categories: [],
+      });
     }
 
     if (vendor_id) {
@@ -1241,76 +1240,236 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       baseWhere += ` AND p.vendor_id = $${baseParams.length}`;
     }
 
-    /** STEP-3: Active Filters for price + search */
-    let params = [...baseParams];
-    let filterWhere = baseWhere;
+    const normalizeBrands = (items = []) =>
+      items
+        .map((b) => String(b).trim().replace(/\s+/g, " ").toLowerCase())
+        .filter(Boolean);
 
-    if (brands.length > 0) {
-      params.push(brands.map(b => b.toLowerCase()));
-      filterWhere += ` AND LOWER(TRIM(p.brand_name)) = ANY($${params.length})`;
-    }
+    const buildWhere = ({
+      includeBrand = true,
+      includeColor = true,
+      includeSize = true,
+      includeGender = true,
+      includePrice = true,
+      includeSearch = true,
+    } = {}) => {
+      let params = [...baseParams];
+      let where = baseWhere;
 
-    if (sizes.length > 0) {
-      params.push(sizes);
-      filterWhere += ` AND pv.normalized_size_final = ANY($${params.length})`;
-    }
+      if (includeBrand && brands.length > 0) {
+        params.push(normalizeBrands(brands));
+        where += ` AND p.brand_name_normalized = ANY($${params.length})`;
+      }
 
-    if (colors.length > 0) {
-      params.push(colors);
-      filterWhere += ` AND pv.normalized_color = ANY($${params.length})`;
-    }
+      if (includeSize && sizes.length > 0) {
+        params.push(sizes);
+        where += ` AND (
+          pv.normalized_size_final = ANY($${params.length})
+          OR pv.normalized_size = ANY($${params.length})
+          OR pv.variant_size = ANY($${params.length})
+          OR pv.attributes->>'size' = ANY($${params.length})
+        )`;
+      }
 
-    if (min_price) {
-      params.push(Number(min_price));
-      filterWhere += ` AND pv.price >= $${params.length}`;
-    }
+      if (includeColor && colors.length > 0) {
+        params.push(colors);
+        where += ` AND (
+          pv.normalized_color = ANY($${params.length}) OR
+          pv.attributes->>'color' = ANY($${params.length})
+        )`;
+      }
 
-    if (max_price) {
-      params.push(Number(max_price));
-      filterWhere += ` AND pv.price <= $${params.length}`;
-    }
+      if (includeGender && genders.length > 0) {
+        const normalizedGenders = genders
+          .map((g) => String(g).trim().toLowerCase())
+          .filter(Boolean);
+        if (normalizedGenders.length > 0) {
+          params.push(normalizedGenders);
+          where += ` AND LOWER(p.gender) = ANY($${params.length})`;
+        }
+      }
 
-    /** 🔥 SEARCH FILTER — Only affects price calculation, not brand/color/size list */
-    if (q) {
-      params.push(`%${q.toLowerCase()}%`);
-      filterWhere += `
-        AND (
-          LOWER(p.name) LIKE $${params.length} OR
-          LOWER(p.brand_name) LIKE $${params.length} OR
-          LOWER(p.short_description) LIKE $${params.length} OR
-          LOWER(p.description) LIKE $${params.length} OR
-          LOWER(pv.variant_size) LIKE $${params.length} OR
-          LOWER(pv.normalized_color) LIKE $${params.length}
-        )
-      `;
-    }
+      if (includePrice && min_price) {
+        params.push(Number(min_price));
+        where += ` AND pv.price >= $${params.length}`;
+      }
 
-    /** STEP-4: Full filter set from category only (NO q applied) */
-    const allFiltersSQL = `
+      if (includePrice && max_price) {
+        params.push(Number(max_price));
+        where += ` AND pv.price <= $${params.length}`;
+      }
+
+      if (includeSearch && q) {
+        params.push(`%${q.toLowerCase()}%`);
+        where += `
+          AND (
+            LOWER(p.name) LIKE $${params.length} OR
+            p.brand_name_normalized LIKE $${params.length} OR
+            LOWER(p.short_description) LIKE $${params.length} OR
+            LOWER(p.description) LIKE $${params.length} OR
+            LOWER(pv.variant_size) LIKE $${params.length} OR
+            LOWER(pv.normalized_color) LIKE $${params.length}
+          )
+        `;
+      }
+
+      return { where, params };
+    };
+
+    /** STEP-4: Full filter set from search results */
+    const brandFiltersSQL = `
       SELECT
-          ARRAY_AGG(DISTINCT INITCAP(TRIM(p.brand_name))) FILTER (WHERE p.brand_name IS NOT NULL AND TRIM(p.brand_name) <> '') AS brands,
-          ARRAY_AGG(DISTINCT pv.normalized_color) FILTER (WHERE pv.normalized_color IS NOT NULL) AS colors,
-          ARRAY_AGG(DISTINCT pv.variant_size) FILTER (WHERE pv.variant_size IS NOT NULL) AS sizes
+        ARRAY_AGG(display_name ORDER BY display_name) AS brands
+      FROM (
+        SELECT
+          p.brand_name_normalized,
+          MIN(p.brand_name) AS display_name
+        FROM products p
+        INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+        LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+        WHERE __WHERE__ AND p.brand_name_normalized IS NOT NULL
+        GROUP BY p.brand_name_normalized
+      ) b;
+    `;
+
+    const brandCountsSQL = `
+      SELECT
+        p.brand_name_normalized AS value,
+        MIN(p.brand_name) AS label,
+        COUNT(DISTINCT p.id)::int AS count
       FROM products p
-      INNER JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
       LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE ${baseWhere};
+      WHERE __WHERE__ AND p.brand_name_normalized IS NOT NULL
+      GROUP BY p.brand_name_normalized
+      ORDER BY label ASC
+    `;
+
+    const colorFiltersSQL = `
+      SELECT
+          ARRAY_AGG(
+            DISTINCT COALESCE(pv.normalized_color, pv.attributes->>'color')
+          ) FILTER (WHERE COALESCE(pv.normalized_color, pv.attributes->>'color') IS NOT NULL) AS colors
+      FROM products p
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+      WHERE __WHERE__;
+    `;
+
+    const colorCountsSQL = `
+      SELECT
+        COALESCE(pv.normalized_color, pv.attributes->>'color') AS value,
+        COUNT(DISTINCT p.id)::int AS count
+      FROM products p
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+      WHERE __WHERE__ AND COALESCE(pv.normalized_color, pv.attributes->>'color') IS NOT NULL
+      GROUP BY COALESCE(pv.normalized_color, pv.attributes->>'color')
+      ORDER BY value ASC
+    `;
+
+    const sizeFiltersSQL = `
+      SELECT
+        ARRAY_AGG(
+          DISTINCT COALESCE(
+            pv.normalized_size_final,
+            pv.normalized_size,
+            pv.variant_size,
+            pv.attributes->>'size'
+          )
+        ) FILTER (WHERE COALESCE(
+          pv.normalized_size_final,
+          pv.normalized_size,
+          pv.variant_size,
+          pv.attributes->>'size'
+        ) IS NOT NULL) AS sizes
+      FROM products p
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+      WHERE __WHERE__;
+    `;
+
+    const sizeCountsSQL = `
+      SELECT
+        COALESCE(
+          pv.normalized_size_final,
+          pv.normalized_size,
+          pv.variant_size,
+          pv.attributes->>'size'
+        ) AS value,
+        COUNT(DISTINCT p.id)::int AS count
+      FROM products p
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+      WHERE __WHERE__ AND COALESCE(
+        pv.normalized_size_final,
+        pv.normalized_size,
+        pv.variant_size,
+        pv.attributes->>'size'
+      ) IS NOT NULL
+      GROUP BY value
+      ORDER BY value ASC
+    `;
+
+    const genderFiltersSQL = `
+      SELECT
+          ARRAY_AGG(DISTINCT LOWER(p.gender)) FILTER (WHERE p.gender IS NOT NULL AND p.gender <> '') AS genders
+      FROM products p
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+      WHERE __WHERE__;
+    `;
+
+    const genderCountsSQL = `
+      SELECT
+        LOWER(p.gender) AS value,
+        COUNT(DISTINCT p.id)::int AS count
+      FROM products p
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+      WHERE __WHERE__ AND p.gender IS NOT NULL AND p.gender <> ''
+      GROUP BY LOWER(p.gender)
+      ORDER BY value ASC
     `;
 
     /** STEP-5: Price range affected by q + filters */
     const activeFiltersSQL = `
       SELECT
           MIN(pv.price) AS min_price,
-          MAX(pv.price) AS max_price
+          MAX(pv.price) AS max_price,
+          COUNT(DISTINCT p.id)::int AS total
       FROM products p
-      INNER JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
+      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
       LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE ${filterWhere};
+      WHERE __WHERE__;
     `;
 
-    const [allFiltersRes, activeFiltersRes] = await Promise.all([
-      client.query(allFiltersSQL, baseParams),
-      client.query(activeFiltersSQL, params),
+    const brandWhere = buildWhere({ includeBrand: false, includeColor: true, includeSize: true, includeGender: true });
+    const colorWhere = buildWhere({ includeBrand: true, includeColor: false, includeSize: true, includeGender: true });
+    const sizeWhere = buildWhere({ includeBrand: true, includeColor: true, includeSize: false, includeGender: true });
+    const genderWhere = buildWhere({ includeBrand: true, includeColor: true, includeSize: true, includeGender: false });
+    const priceWhere = buildWhere({ includeBrand: true, includeColor: true, includeSize: true, includeGender: true });
+
+    const [
+      brandRes,
+      brandCountsRes,
+      colorRes,
+      colorCountsRes,
+      sizeRes,
+      sizeCountsRes,
+      genderRes,
+      genderCountsRes,
+      activeFiltersRes,
+    ] = await Promise.all([
+      client.query(brandFiltersSQL.replace("__WHERE__", brandWhere.where), brandWhere.params),
+      client.query(brandCountsSQL.replace("__WHERE__", brandWhere.where), brandWhere.params),
+      client.query(colorFiltersSQL.replace("__WHERE__", colorWhere.where), colorWhere.params),
+      client.query(colorCountsSQL.replace("__WHERE__", colorWhere.where), colorWhere.params),
+      client.query(sizeFiltersSQL.replace("__WHERE__", sizeWhere.where), sizeWhere.params),
+      client.query(sizeCountsSQL.replace("__WHERE__", sizeWhere.where), sizeWhere.params),
+      client.query(genderFiltersSQL.replace("__WHERE__", genderWhere.where), genderWhere.params),
+      client.query(genderCountsSQL.replace("__WHERE__", genderWhere.where), genderWhere.params),
+      client.query(activeFiltersSQL.replace("__WHERE__", priceWhere.where), priceWhere.params),
     ]);
 
     let childCats = [];
@@ -1323,13 +1482,19 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     }
 
     return sendResponse(res, 200, true, "Filters fetched", {
-      brands: allFiltersRes.rows[0].brands || [],
-      colors: allFiltersRes.rows[0].colors || [],
-      sizes: allFiltersRes.rows[0].sizes || [],
+      brands: brandRes.rows[0].brands || [],
+      brand_counts: brandCountsRes.rows || [],
+      colors: colorRes.rows[0].colors || [],
+      color_counts: colorCountsRes.rows || [],
+      sizes: sizeRes.rows[0].sizes || [],
+      size_counts: sizeCountsRes.rows || [],
+      genders: genderRes.rows[0].genders || [],
+      gender_counts: genderCountsRes.rows || [],
       price: {
         min: Number(activeFiltersRes.rows[0].min_price || 0),
         max: Number(activeFiltersRes.rows[0].max_price || 0),
       },
+      total: Number(activeFiltersRes.rows[0].total || 0),
       child_categories: childCats,
     });
   } catch (err) {
@@ -1969,9 +2134,9 @@ module.exports.updateProductPriceByVendorId = catchAsync(
 
 module.exports.getAllBrands = catchAsync(async (req, res, next) => {
   const client = await dbPool.connect();
-  let { search } = req.query;
+  let { search, category_slug } = req.query;
   try {
-    const allBrands = await ProductService.getAllBrands(search, client);
+    const allBrands = await ProductService.getAllBrands(search, category_slug, client);
     return sendResponse(
       res,
       200,
@@ -1999,15 +2164,19 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
     }
 
     // ---------------------------------------------------------
-    // 1) Fetch Base Product (ID, category, brand, gender, color)
+    // 1) Fetch Base Product (ID, our categories, brand, gender, color)
     // ---------------------------------------------------------
     const baseSql = `
       SELECT
         p.id,
-        p.default_category_id,
         p.brand_name,
         p.gender,
         p.attributes->>'color' AS color,
+        (
+          SELECT ARRAY_AGG(DISTINCT pom.our_category_id)
+          FROM product_our_category_map pom
+          WHERE pom.product_id = p.id
+        ) AS our_category_ids,
         (
           SELECT MIN(v.price)
           FROM product_variants v
@@ -2042,7 +2211,7 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
       base AS (
         SELECT
           $1::uuid AS id,
-          $2::uuid AS default_category_id,
+          $2::uuid[] AS our_category_ids,
           $3::text AS brand_name,
           $4::text AS gender,
           $5::text AS color,
@@ -2063,7 +2232,14 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
         ))
       ORDER BY
         (
-          (CASE WHEN p.default_category_id = b.default_category_id THEN 3 ELSE 0 END) +
+          (CASE
+            WHEN b.our_category_ids IS NOT NULL AND EXISTS (
+              SELECT 1 FROM product_our_category_map pom_s
+              WHERE pom_s.product_id = p.id
+                AND pom_s.our_category_id = ANY(b.our_category_ids)
+            ) THEN 3
+            ELSE 0
+          END) +
           (CASE WHEN LOWER(p.brand_name) = LOWER(b.brand_name) THEN 2 ELSE 0 END) +
           (CASE WHEN LOWER(p.gender) = LOWER(b.gender) THEN 1 ELSE 0 END) +
           (CASE WHEN LOWER(p.attributes->>'color') = LOWER(b.color) THEN 1 ELSE 0 END)
@@ -2074,7 +2250,7 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
 
     const similarIdsResult = await client.query(similarSql, [
       base.id,
-      base.default_category_id,
+      base.our_category_ids,
       base.brand_name,
       base.gender,
       base.color,

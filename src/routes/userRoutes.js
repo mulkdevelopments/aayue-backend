@@ -10,6 +10,7 @@ router.get("/ok", (req, res) => {
   });
 });
 
+router.post("/request-access", indexCtrl.accessRequestController.createAccessRequest);
 router.post("/register-user", indexCtrl.userAuthController.registerUser);
 router.post(
   "/register-guest-user",
@@ -89,8 +90,8 @@ router.get(
   indexCtrl.productManagementController.getProductById
 );
 
-const { checkLuxuryStock } = require("../controllers/importController/luxuryDistibution/luxuryStockCheckService");
-router.get("/check-live-stock", checkLuxuryStock);
+const { checkLiveStock } = require("../controllers/importController/vendorSyncService");
+router.get("/check-live-stock", checkLiveStock);
 router.get(
   "/get-filters-for-products",
   indexCtrl.productManagementController.getDynamicFilters
@@ -115,6 +116,10 @@ router.get(
 router.get(
   "/get-products-by-brand",
   indexCtrl.userBrandSpotlightController.getProductsByBrand
+);
+router.get(
+  "/get-brand-groups",
+  indexCtrl.userBrandGroupController.getActiveBrandGroups
 );
 
 /**================== New Arrival Routes ================== */
@@ -158,7 +163,7 @@ router.post(
   protectUser,
   indexCtrl.paymentController.createCheckoutSession
 );
-// router.post('/webhook', indexCtrl.paymentController.handleStripeWebhook);
+router.post("/webhook", indexCtrl.paymentController.stripeWebhookHandler);
 router.post(
   "/verify-payment",
   protectUser,
@@ -233,6 +238,15 @@ router.get("/google", indexCtrl.userAuthController.googleAuthRedirect);
 // Google callback - Google redirects here with ?code
 router.get("/google/callback", indexCtrl.userAuthController.googleAuthCallback);
 
+/**================== Apple Auth Routes ================== */
+
+// Redirect user to Apple consent screen
+router.get("/apple", indexCtrl.userAuthController.appleAuthRedirect);
+
+// Apple callback (form_post or query)
+router.post("/apple/callback", indexCtrl.userAuthController.appleAuthCallback);
+router.get("/apple/callback", indexCtrl.userAuthController.appleAuthCallback);
+
 router.get("/get-home-banners", indexCtrl.bannerController.getHomeBanners);
 
 router.post('/contact-us', indexCtrl.contactUsController.createContactMessage);
@@ -240,6 +254,12 @@ router.post('/contact-us', indexCtrl.contactUsController.createContactMessage);
 /**================= Newsletter Routes ================= */
 
 router.post('/subscribe-newsletter', indexCtrl.newsLetterController.subscribeNewsletter);
+
+/**================= Stock Notify Routes ================= */
+router.post("/notify-stock", indexCtrl.stockNotifyController.createStockNotifyRequest);
+
+/**================= Access Request Routes ================= */
+router.post("/request-access", indexCtrl.accessRequestController.createAccessRequest);
 
 router.get("/get-overlay-grid", indexCtrl.bannerController.getOverlayGrid);
 

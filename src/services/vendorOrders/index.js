@@ -11,6 +11,7 @@ const VendorServiceFactory = require('./VendorServiceFactory');
 const BaseVendorService = require('./BaseVendorService');
 const LuxuryDistributionService = require('./LuxuryDistributionService');
 const ManualVendorService = require('./ManualVendorService');
+const BrandsgatewayService = require('./BrandsgatewayService');
 
 module.exports = {
   // Main API
@@ -22,5 +23,6 @@ module.exports = {
   // Service classes (for extension)
   BaseVendorService,
   LuxuryDistributionService,
-  ManualVendorService
+  ManualVendorService,
+  BrandsgatewayService
 };

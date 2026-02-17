@@ -6,6 +6,7 @@
 
 const dbPool = require('../../db/dbConnection');
 const LuxuryDistributionService = require('./LuxuryDistributionService');
+const BrandsgatewayService = require('./BrandsgatewayService');
 const ManualVendorService = require('./ManualVendorService');
 
 class VendorServiceFactory {
@@ -46,6 +47,11 @@ class VendorServiceFactory {
     // Determine which service to use based on integration_type
     switch (vendor.integration_type) {
       case 'api':
+        // Brandsgateway uses API order placement even if capability is not updated yet
+        if (vendor.name.toLowerCase().includes('brandsgateway')) {
+          return new BrandsgatewayService(vendor.id, vendor.name, capabilities);
+        }
+
         // Check if vendor has order placement API
         if (capabilities.has_order_placement_api) {
           return this.getApiVendorService(vendor);
@@ -74,6 +80,10 @@ class VendorServiceFactory {
 
     if (vendorNameLower.includes('luxury-distribution') || vendorNameLower.includes('luxury distribution')) {
       return new LuxuryDistributionService(vendor.id, vendor.name, vendor.capabilities);
+    }
+
+    if (vendorNameLower.includes('brandsgateway')) {
+      return new BrandsgatewayService(vendor.id, vendor.name, vendor.capabilities);
     }
 
     // Add more API vendors here in future:

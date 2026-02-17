@@ -6,7 +6,7 @@ const dbPool = require("../../db/dbConnection");
 const AppError = require("../../errorHandling/AppError");
 const { UserServices } = require("../../services/userServices");
 const { isValidEmail, isValidUUID } = require("../../utils/basicValidation");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const nodemailer = require("nodemailer");
 
 const generateMagicToken = (userId) => {

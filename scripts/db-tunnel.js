@@ -6,7 +6,7 @@ const fs = require('fs');
 // Configuration
 const CONFIG = {
   keyPath: path.join(os.homedir(), 'Downloads', 'aayeu-ecom-key.pem'),
-  remoteHost: 'ec2-16-171-230-120.eu-north-1.compute.amazonaws.com',
+  remoteHost: 'ec2-51-20-243-76.eu-north-1.compute.amazonaws.com',
   remoteUser: 'ubuntu',
   // PostgreSQL tunnel
   localPortPg: 5433,

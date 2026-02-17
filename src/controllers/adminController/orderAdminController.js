@@ -5,10 +5,13 @@ const AppError = require("../../errorHandling/AppError");
 const sendResponse = require("../../utils/sendResponse");
 const OrderAdminService = require("../../services/orderAdminService");
 const { isValidUUID } = require("../../utils/basicValidation");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const nodemailer = require("nodemailer");
 const { sendOrderStatusEmail } = require("../../utils/sendMail");
 const { UserServices } = require("../../services/userServices");
+const Stripe = require("stripe");
+const OrderService = require("../../services/orderService");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /**
  * GET /admin/orders
@@ -255,6 +258,174 @@ module.exports.updateOrderStatus = catchAsync(async (req, res, next) => {
   }
 });
 
+/**
+ * POST /admin/verify-payment
+ * Body: { orderId, session_id?, payment_intent? }
+ * Manually verify payment with Stripe and finalize order if paid.
+ */
+module.exports.verifyOrderPayment = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const { orderId, session_id, payment_intent } = req.body;
+
+    if (!orderId && !session_id && !payment_intent) {
+      return next(
+        new AppError("Provide orderId or session_id or payment_intent", 400)
+      );
+    }
+
+    if (orderId && !isValidUUID(orderId)) {
+      return next(new AppError("Invalid order id", 400));
+    }
+
+    let sessionIdToUse = session_id || null;
+    if (orderId) {
+      const { rows: orderRows } = await client.query(
+        `SELECT id, stripe_session_id
+         FROM orders
+         WHERE id = $1 AND deleted_at IS NULL`,
+        [orderId]
+      );
+      if (orderRows.length === 0)
+        return next(new AppError("Order not found", 404));
+
+      const order = orderRows[0];
+      if (!sessionIdToUse) sessionIdToUse = order.stripe_session_id || null;
+    }
+
+    if (!sessionIdToUse && !payment_intent) {
+      return next(new AppError("Stripe session not found for this order", 400));
+    }
+
+    let stripePaymentId = null;
+    let stripeStatus = null;
+    let session = null;
+
+    if (sessionIdToUse) {
+      session = await stripe.checkout.sessions.retrieve(sessionIdToUse, {
+        expand: [
+          "payment_intent",
+          "payment_intent.charges",
+          "payment_intent.charges.data.payment_method_details",
+          "payment_intent.payment_method",
+        ],
+      });
+      if (!session) return next(new AppError("Stripe session not found", 404));
+
+      if (
+        session.payment_intent &&
+        typeof session.payment_intent === "object"
+      ) {
+        stripePaymentId = session.payment_intent.id;
+        stripeStatus = session.payment_intent.status;
+      } else if (session.payment_intent) {
+        const pi = await stripe.paymentIntents.retrieve(session.payment_intent);
+        stripePaymentId = pi.id;
+        stripeStatus = pi.status;
+      } else {
+        stripeStatus = session.payment_status || null;
+      }
+    } else if (payment_intent) {
+      const pi = await stripe.paymentIntents.retrieve(payment_intent);
+      if (!pi) return next(new AppError("Payment intent not found", 404));
+      stripePaymentId = pi.id;
+      stripeStatus = pi.status;
+    }
+
+    const paidStatuses = new Set(["succeeded", "requires_capture"]);
+    if (!stripeStatus || !paidStatuses.has(stripeStatus)) {
+      return next(
+        new AppError(
+          `Payment not completed. Stripe status: ${stripeStatus}`,
+          400
+        )
+      );
+    }
+
+    await client.query("BEGIN");
+
+    try {
+      const paymentIntentObj =
+        sessionIdToUse && typeof session?.payment_intent === "object"
+          ? session.payment_intent
+          : payment_intent
+          ? await stripe.paymentIntents.retrieve(payment_intent)
+          : null;
+
+      const charge = paymentIntentObj?.charges?.data?.[0];
+      const chargeId = charge?.id || paymentIntentObj?.latest_charge || null;
+
+      const transactionRef = `TXN-${new Date()
+        .toISOString()
+        .replace(/[-:.TZ]/g, "")
+        .slice(0, 14)}`;
+
+      await client.query(
+        `
+        INSERT INTO payments (
+          order_id, amount, method, status,
+          stripe_session_id, stripe_payment_intent_id, stripe_charge_id,
+          transaction_reference, currency, card_brand, card_last4,
+          receipt_url, provider_response, metadata, paid_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW())
+        ON CONFLICT (order_id)
+        DO UPDATE SET
+          status = EXCLUDED.status,
+          stripe_session_id = EXCLUDED.stripe_session_id,
+          stripe_payment_intent_id = EXCLUDED.stripe_payment_intent_id,
+          stripe_charge_id = EXCLUDED.stripe_charge_id,
+          transaction_reference = EXCLUDED.transaction_reference,
+          currency = EXCLUDED.currency,
+          card_brand = EXCLUDED.card_brand,
+          card_last4 = EXCLUDED.card_last4,
+          receipt_url = EXCLUDED.receipt_url,
+          provider_response = EXCLUDED.provider_response,
+          metadata = EXCLUDED.metadata,
+          paid_at = NOW()
+        `,
+        [
+          orderId,
+          paymentIntentObj?.amount / 100 || 0,
+          "stripe",
+          paymentIntentObj?.status || "succeeded",
+          sessionIdToUse,
+          paymentIntentObj?.id,
+          chargeId,
+          transactionRef,
+          paymentIntentObj?.currency || "aed",
+          charge?.payment_method_details?.card?.brand || null,
+          charge?.payment_method_details?.card?.last4 || null,
+          charge?.receipt_url || null,
+          paymentIntentObj,
+          paymentIntentObj?.metadata || {},
+        ]
+      );
+    } catch (saveErr) {
+      console.error("⚠️ Failed to save payment details:", saveErr.message);
+    }
+
+    const finalizeRes = await OrderService.finalizePaidOrder(
+      { order_id: orderId, payment_id: stripePaymentId },
+      client
+    );
+
+    await client.query("COMMIT");
+
+    return sendResponse(res, 200, true, "Payment verified", {
+      order_id: orderId,
+      payment_status: "paid",
+      payment_id: stripePaymentId,
+      result: finalizeRes,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "email-smtp.eu-north-1.amazonaws.com",
   port: parseInt(process.env.SMTP_PORT) || 587,
@@ -331,7 +502,7 @@ module.exports.cancelOrder = catchAsync(async (req, res, next) => {
         `INSERT INTO inventory_transactions (id, variant_id, change, reason, reference_id, created_at)
          VALUES ($1,$2,$3,$4,$5, now())`,
         [
-          uuidv4(),
+          randomUUID(),
           it.variant_id,
           +Math.abs(it.qty || 0), // POSITIVE since stock is added back
           "order_cancelled",

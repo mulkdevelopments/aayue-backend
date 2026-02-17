@@ -3,8 +3,7 @@ const {
 } = require("../controllers/adminController/dashboardController");
 const dbPool = require("../db/dbConnection");
 const AppError = require("../errorHandling/AppError");
-const { v4: uuidv4 } = require("uuid");
-
+const { randomUUID } = require("crypto");
 const DashboardService = {
   async getDashboardData(client) {
     try {

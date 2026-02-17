@@ -1,6 +1,5 @@
 // services/bestSellerService.js
-const { v4: uuidv4 } = require('uuid');
-
+const { randomUUID } = require("crypto");
 const BestSellerService = {
     /**
      * addBestSeller
@@ -8,7 +7,7 @@ const BestSellerService = {
      * client: pg client (transaction controlled by caller)
      */
     async addBestSeller(payload, client) {
-        const id = uuidv4();
+        const id = randomUUID();
         const insertSQL = `
       INSERT INTO best_sellers (
         id, product_id, vendor_id, rank, meta, active, start_at, end_at, created_by, created_at, updated_at

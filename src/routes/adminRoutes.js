@@ -6,6 +6,15 @@ const { validateProductImages } = require("../cron/productImageValidator");
 const {
   fetchAllLuxuryProducts,
 } = require("../controllers/importController/luxuryDistibution/luxuryDistributionService");
+const {
+  fetchAllPeppelaProducts,
+} = require("../controllers/importController/peppela/peppelaDistributionService");
+const {
+  fetchAllBrandsgatewayProducts,
+} = require("../controllers/importController/brandsgateway/brandsgatewayDistributionService");
+const {
+  fetchAllBdroppyProducts,
+} = require("../controllers/importController/bdroppy/bdroppyDistributionService");
 const { AdminServices } = require("../services/adminService");
 const { protectAdmin } = require("../middlewares/authMiddleware");
 
@@ -137,6 +146,36 @@ router.get(
 // router.put('/update-brand-spotlight/:id', indexCtrl.brandSpotlightController.updateSpotlight);
 // router.delete('/remove-brand-spotlight/:id', indexCtrl.brandSpotlightController.deleteSpotlight);
 
+/**================= Brand Group Routes ================ */
+router.get(
+  "/brand-groups",
+  indexCtrl.brandGroupController.listGroupsAdmin
+);
+router.post(
+  "/brand-groups",
+  indexCtrl.brandGroupController.createGroup
+);
+router.put(
+  "/brand-groups/:id",
+  indexCtrl.brandGroupController.updateGroup
+);
+router.delete(
+  "/brand-groups/:id",
+  indexCtrl.brandGroupController.deleteGroup
+);
+router.get(
+  "/brand-group-brands",
+  indexCtrl.brandGroupController.listGroupBrandsAdmin
+);
+router.post(
+  "/brand-group-brands",
+  indexCtrl.brandGroupController.addGroupBrand
+);
+router.delete(
+  "/brand-group-brands/:id",
+  indexCtrl.brandGroupController.deleteGroupBrand
+);
+
 /**================= New Arrival Routes ================ */
 router.post(
   "/add-new-arrival",
@@ -195,6 +234,10 @@ router.put(
   "/update-order-status",
   indexCtrl.orderAdminController.updateOrderStatus
 );
+router.post(
+  "/verify-payment",
+  indexCtrl.orderAdminController.verifyOrderPayment
+);
 
 /**================= Mapping category Apis================== */
 
@@ -241,12 +284,13 @@ router.get("/get-dashboard-data", indexCtrl.dashboardController.getDashboard);
 
 /** =================Luxury Product Routes==================== */
 router.post("/get-products-from-luxury", fetchAllLuxuryProducts);
+router.post("/get-products-from-peppela", fetchAllPeppelaProducts);
+router.post("/get-products-from-brandsgateway", fetchAllBrandsgatewayProducts);
+router.post("/get-products-from-bdroppy", fetchAllBdroppyProducts);
 
-const { syncIndividualLuxuryProduct } = require("../controllers/importController/luxuryDistibution/luxuryIndividualSyncService");
-router.post("/sync-individual-product", syncIndividualLuxuryProduct);
-
-const { checkLuxuryStock } = require("../controllers/importController/luxuryDistibution/luxuryStockCheckService");
-router.get("/check-live-stock", checkLuxuryStock);
+const { syncIndividualProduct, checkLiveStock } = require("../controllers/importController/vendorSyncService");
+router.post("/sync-individual-product", syncIndividualProduct);
+router.get("/check-live-stock", checkLiveStock);
 
 /** =================Vendor Sync Job Routes==================== */
 const vendorSyncJobCtrl = require("../controllers/vendorSyncJobController");
@@ -309,8 +353,28 @@ router.get("/get-home-banners", indexCtrl.bannerController.getHomeBanners);
 
 router.get("/get-policies", indexCtrl.policyController.getPolicy);
 
+/**================= Auto Map Jobs ================== */
+router.post(
+  "/auto-map/start",
+  indexCtrl.autoMapController.startAutoMap
+);
+router.get(
+  "/auto-map/status",
+  indexCtrl.autoMapController.getAutoMapStatus
+);
+router.get(
+  "/auto-map/active",
+  indexCtrl.autoMapController.getActiveAutoMapJob
+);
+router.post(
+  "/auto-map/stop",
+  indexCtrl.autoMapController.stopAutoMap
+);
+
 
 /**=================Contact us================= */
+router.get("/get-access-requests", protectAdmin, indexCtrl.accessRequestController.getAllAccessRequests);
+router.post("/send-magic-link-to-request", protectAdmin, indexCtrl.accessRequestController.sendMagicLinkToRequest);
 router.get("/get-contact-messages", indexCtrl.contactUsController.getAllContactMessages);
 router.get("/get-contact-message", indexCtrl.contactUsController.getContactMessage);
 router.delete("/delete-contact-message", indexCtrl.contactUsController.deleteContactMessage);
@@ -319,12 +383,18 @@ router.delete("/delete-contact-message", indexCtrl.contactUsController.deleteCon
 router.get("/get-newsletter-subscribers", indexCtrl.newsLetterController.getAllNewsletterSubscribers);
 router.delete("/delete-newsletter-subscriber", indexCtrl.newsLetterController.deleteNewsletterSubscriber);
 
+/**================= Stock Notify Routes ================= */
+router.get("/stock-notify", indexCtrl.stockNotifyController.listStockNotifyRequests);
+router.put("/stock-notify/:id", indexCtrl.stockNotifyController.updateStockNotifyRequest);
+router.delete("/stock-notify/:id", indexCtrl.stockNotifyController.deleteStockNotifyRequest);
+
 router.post(
   "/create-overlay-grid",
   indexCtrl.bannerController.upsertOverlayGrid
 );
 
 router.get("/get-overlay-grid", indexCtrl.bannerController.getOverlayGrid);
+router.delete("/delete-overlay-grid", indexCtrl.bannerController.deleteOverlayGrid);
 
 /**================== Sale By Caategory Routes================ */
 

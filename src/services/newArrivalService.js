@@ -1,9 +1,8 @@
 // services/newArrivalService.js
-const { v4: uuidv4 } = require('uuid');
-
+const { randomUUID } = require("crypto");
 const NewArrivalService = {
   async createNewArrival({ product_id, rank = null, meta = {}, active = true, start_at = null, end_at = null, created_by = null }, client) {
-    const id = uuidv4();
+    const id = randomUUID();
     const sql = `
       INSERT INTO new_arrivals (id, product_id, rank, meta, active, start_at, end_at, created_by, created_at, updated_at)
       VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8, now(), now())

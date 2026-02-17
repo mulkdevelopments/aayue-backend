@@ -14,6 +14,7 @@ const sendResponse = require('./src/utils/sendResponse');
 const path = require('path'); 
 require('./src/cron/productImageValidator'); // Start the cron job
 require('./src/cron/exchangeRateUpdater'); // Update currency rates every 6 hours
+require('./src/cron/vendorAutoSync'); // Auto vendor sync at midnight
 
 
 
@@ -33,9 +34,16 @@ app.use(cors({
     origin: corsOrigins,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     credentials: true, // Allow cookies and authorization headers
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cache-Control', 'Pragma'],
 }));
-app.use(express.json({ limit: '10mb' }));
+app.use(
+    express.json({
+        limit: '10mb',
+        verify: (req, res, buf) => {
+            req.rawBody = buf;
+        },
+    })
+);
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 

@@ -1,11 +1,12 @@
 // controllers/homeBannerController.js
 const { Pool } = require("pg");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID } = require("crypto");
 const catchAsync = require("../../errorHandling/catchAsync");
 const AppError = require("../../errorHandling/AppError");
 const sendResponse = require("../../utils/sendResponse");
 require("dotenv").config({ path: "../../../.env" });
 const dbPool = require("../../db/dbConnection");
+const cloudinary = require("../../config/cloudinary");
 // const dbPool = new Pool({
 //   connectionString: process.env.DATABASE_URL,
 //   max: parseInt(process.env.PG_MAX_CLIENTS || "20", 10),
@@ -44,6 +45,34 @@ function normalizeBannerPayload(raw) {
     metadata: raw.metadata || null,
   };
 }
+
+const deleteCloudinaryAsset = async (assetUrl) => {
+  if (!assetUrl) return;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(assetUrl);
+  } catch (err) {
+    return;
+  }
+
+  const parts = parsedUrl.pathname.split("/").filter(Boolean);
+  const uploadIndex = parts.findIndex((part) => part === "upload");
+  if (uploadIndex === -1 || uploadIndex + 1 >= parts.length) return;
+
+  const resourceType = parts[uploadIndex - 1] || "image";
+  let publicParts = parts.slice(uploadIndex + 1);
+  if (publicParts[0] && /^v\d+$/.test(publicParts[0])) {
+    publicParts = publicParts.slice(1);
+  }
+  const filename = publicParts.join("/");
+  const publicId = filename.replace(/\.[^/.]+$/, "");
+  if (!publicId) return;
+
+  await cloudinary.uploader.destroy(publicId, {
+    resource_type: resourceType,
+    invalidate: true,
+  });
+};
 
 /**
  * GET /home-banners
@@ -161,7 +190,7 @@ exports.upsertHomeBanners = catchAsync(async (req, res, next) => {
     const updatedSlots = [];
 
     for (const b of normalized) {
-      const id = uuidv4();
+      const id = randomUUID();
       const values = [
         id, // $1 id
         b.slot, // $2 slot
@@ -209,11 +238,12 @@ module.exports.upsertOverlayGrid = catchAsync(async (req, res, next) => {
     if (id) {
       // 1️⃣ Update using ID
       const existing = await client.query(
-        "SELECT id FROM overlaygrid WHERE id = $1",
+        "SELECT id, product_image FROM overlaygrid WHERE id = $1",
         [id]
       );
 
       if (existing.rows.length > 0) {
+        const previousImage = existing.rows[0]?.product_image || null;
         result = await client.query(
           `UPDATE overlaygrid 
            SET title=$1, mrp=$2, sale_price=$3, product_image=$4, product_redirect_url=$5, updated_at=NOW()
@@ -221,6 +251,17 @@ module.exports.upsertOverlayGrid = catchAsync(async (req, res, next) => {
            RETURNING *`,
           [title, mrp, sale_price, product_image, product_redirect_url, id]
         );
+
+        if (previousImage && product_image && previousImage !== product_image) {
+          try {
+            await deleteCloudinaryAsset(previousImage);
+          } catch (err) {
+            console.warn(
+              "Failed to delete previous overlay image:",
+              err.message || err
+            );
+          }
+        }
 
         return sendResponse(
           res,
@@ -292,5 +333,60 @@ module.exports.getOverlayGrid = catchAsync(async (req, res, next) => {
     return next(new AppError("Failed to fetch overlay grid items", 500));
   } finally {
     client.release();
+  }
+});
+
+module.exports.deleteOverlayGrid = catchAsync(async (req, res, next) => {
+  let client;
+  try {
+    const { id } = req.query;
+    if (!id) {
+      return next(new AppError("Overlay id required", 400));
+    }
+
+    client = await dbPool.connect();
+    const existing = await client.query(
+      "SELECT id, product_image FROM overlaygrid WHERE id = $1",
+      [id]
+    );
+    if (!existing.rows.length) {
+      return next(new AppError("Overlay not found", 404));
+    }
+
+    const result = await client.query(
+      `DELETE FROM overlaygrid
+       WHERE id = $1
+       RETURNING id`,
+      [id]
+    );
+
+    if (!result.rows.length) {
+      return next(new AppError("Overlay not found", 404));
+    }
+
+    const previousImage = existing.rows[0]?.product_image || null;
+    if (previousImage) {
+      try {
+        await deleteCloudinaryAsset(previousImage);
+      } catch (err) {
+        console.warn(
+          "Failed to delete overlay image from Cloudinary:",
+          err.message || err
+        );
+      }
+    }
+
+    return sendResponse(
+      res,
+      200,
+      true,
+      "Overlay grid item deleted successfully",
+      result.rows[0]
+    );
+  } catch (err) {
+    console.error(err);
+    return next(new AppError("Failed to delete overlay grid item", 500));
+  } finally {
+    if (client) client.release();
   }
 });

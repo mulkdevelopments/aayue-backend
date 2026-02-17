@@ -27,8 +27,18 @@ module.exports.getAICategorySuggestions = catchAsync(async (req, res, next) => {
       return next(new AppError("Product not found", 404));
     }
 
-    // Fetch our categories (the ones we want to map to)
-    const categories = await CategoryService.getAllOurCategories(client);
+    const vendorCategory =
+      (product.categories || []).find((c) => c.is_our_category !== true) ||
+      (product.categories || [])[0] ||
+      null;
+
+    if (vendorCategory) {
+      product.vendor_category_name = vendorCategory.name || "";
+      product.vendor_category_path = vendorCategory.path || "";
+    }
+
+    // Fetch only our categories (the ones we want to map to)
+    const categories = await CategoryService.getAllOurCategories(client, true);
     if (!categories || categories.length === 0) {
       return next(new AppError("No categories available for mapping", 404));
     }

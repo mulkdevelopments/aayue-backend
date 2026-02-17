@@ -4,8 +4,8 @@ module.exports = {
   findUserByEmail: `SELECT * FROM users WHERE email = $1 LIMIT 1`,
   findUserById: `SELECT * FROM users WHERE id = $1 LIMIT 1`,
   insertUser: `
-    INSERT INTO users (full_name, email, phone, provider, google_sub)
-    VALUES ($1, $2, $3, $4, $5)
+    INSERT INTO users (full_name, email, phone, provider, google_sub, apple_sub)
+    VALUES ($1, $2, $3, $4, $5, $6)
     RETURNING *`,
   updateUserProfile: `
     UPDATE users

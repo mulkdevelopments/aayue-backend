@@ -33,6 +33,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
     "fast-csv": "^5.0.5",
+    "fast-xml-parser": "^5.3.3",
     "helmet": "^8.1.0",
     "hpp": "^0.2.3",
     "ioredis": "^5.8.2",

@@ -1,6 +1,5 @@
 // src/services/cartService.js
-const { v4: uuidv4 } = require("uuid");
-
+const { randomUUID } = require("crypto");
 const CartService = {
   /**
    * getOrCreateCartForUser - returns cart row for user (creates if missing)
@@ -13,7 +12,7 @@ const CartService = {
     );
     if (rows.length) return rows[0];
 
-    const id = uuidv4();
+    const id = randomUUID();
     const ins = await client.query(
       `INSERT INTO carts (id, user_id, metadata, created_at) VALUES ($1,$2,$3, now()) RETURNING *`,
       [id, user_id, null]
@@ -87,7 +86,7 @@ const CartService = {
       await client.query(
         `INSERT INTO cart_items (id, cart_id, variant_id, qty, price, created_at)
          VALUES ($1,$2,$3,$4,$5, now())`,
-        [uuidv4(), cart.id, variant_id, qty, final_price]
+        [randomUUID(), cart.id, variant_id, qty, final_price]
       );
     }
 
@@ -490,7 +489,7 @@ const CartService = {
           await client.query(
             `INSERT INTO cart_items (id, cart_id, variant_id, qty, price, created_at)
                    VALUES ($1, $2, $3, $4, $5, now())`,
-            [uuidv4(), cart.id, variant_id, qty, sale_price]
+            [randomUUID(), cart.id, variant_id, qty, sale_price]
           );
         }
       }
@@ -582,7 +581,7 @@ const CartService = {
         await client.query(
           `INSERT INTO cart_items (id, cart_id, variant_id, qty, price, created_at)
          VALUES ($1, $2, $3, $4, $5, NOW())`,
-          [uuidv4(), cart.id, variant_id, qty, final_price]
+          [randomUUID(), cart.id, variant_id, qty, final_price]
         );
       }
     }

@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS products (
   short_description TEXT,
   description TEXT,
   brand_name VARCHAR(255),
+  brand_name_normalized VARCHAR(255),
   gender VARCHAR(50),
   default_category_id UUID,
   attributes JSONB, -- flexible attributes
@@ -112,6 +113,7 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE INDEX IF NOT EXISTS idx_products_vendor_id ON products(vendor_id);
 CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_name);
+CREATE INDEX IF NOT EXISTS idx_products_brand_normalized ON products(brand_name_normalized);
 CREATE INDEX IF NOT EXISTS idx_products_gender ON products(gender);
 CREATE INDEX IF NOT EXISTS idx_products_is_active ON products(is_active);
 CREATE INDEX IF NOT EXISTS idx_products_productid ON products(productid);
@@ -447,6 +449,38 @@ CREATE INDEX IF NOT EXISTS idx_brand_spotlights_rank ON brand_spotlights(rank);
 CREATE INDEX IF NOT EXISTS idx_brand_spotlights_active_dates ON brand_spotlights(active, start_at, end_at);
 `,
 
+  `-- 2025xx_create_brand_groups.sql
+CREATE TABLE IF NOT EXISTS brand_groups (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(255) NOT NULL,
+  slug VARCHAR(255) NOT NULL UNIQUE,
+  meta JSONB DEFAULT '{}'::jsonb,
+  rank INT DEFAULT NULL,
+  active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+
+CREATE TABLE IF NOT EXISTS brand_group_brands (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID NOT NULL REFERENCES brand_groups(id) ON DELETE CASCADE,
+  brand_name VARCHAR(255) NOT NULL,
+  rank INT DEFAULT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_brand_group_brand
+  ON brand_group_brands(group_id, brand_name)
+  WHERE deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_brand_groups_rank ON brand_groups(rank);
+CREATE INDEX IF NOT EXISTS idx_brand_groups_active ON brand_groups(active);
+CREATE INDEX IF NOT EXISTS idx_brand_group_brands_rank ON brand_group_brands(rank);
+`,
+
   `-- 2025xx_create_new_arrivals.sql
 CREATE TABLE IF NOT EXISTS new_arrivals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -623,6 +657,76 @@ ADD COLUMN IF NOT EXISTS size_type VARCHAR(50);
 CREATE INDEX IF NOT EXISTS idx_variants_vendor_id ON product_variants(vendor_id);
 CREATE INDEX IF NOT EXISTS idx_variants_normalized_size ON product_variants(normalized_size);
 CREATE INDEX IF NOT EXISTS idx_variants_normalized_color ON product_variants(normalized_color);
+`,
+
+  `-- 2026xx_add_brand_name_normalized.sql
+CREATE EXTENSION IF NOT EXISTS unaccent;
+
+ALTER TABLE products
+ADD COLUMN IF NOT EXISTS brand_name_normalized VARCHAR(255);
+
+UPDATE products
+SET brand_name_normalized = LOWER(
+  REGEXP_REPLACE(
+    REGEXP_REPLACE(unaccent(TRIM(brand_name)), '[^a-zA-Z0-9]+', ' ', 'g'),
+    '\\s+', ' ', 'g'
+  )
+)
+WHERE brand_name IS NOT NULL;
+
+UPDATE products
+SET brand_name_normalized = NULL
+WHERE brand_name_normalized = '';
+
+CREATE INDEX IF NOT EXISTS idx_products_brand_normalized
+ON products (brand_name_normalized);
+`,
+
+  `-- 2026xx_add_apple_sub_to_users.sql
+ALTER TABLE users
+ADD COLUMN IF NOT EXISTS apple_sub VARCHAR(255);
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_apple_sub_key
+ON users (apple_sub)
+WHERE apple_sub IS NOT NULL;
+`,
+
+  `-- Access requests (non-allowed domains request access; admin can send magic link)
+CREATE TABLE IF NOT EXISTS access_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  full_name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  status VARCHAR(50) DEFAULT 'pending',
+  magic_link_sent_at TIMESTAMP WITH TIME ZONE,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_access_requests_email ON access_requests(email);
+CREATE INDEX IF NOT EXISTS idx_access_requests_status ON access_requests(status);
+CREATE INDEX IF NOT EXISTS idx_access_requests_created_at ON access_requests(created_at DESC);
+`,
+
+  `-- Stock notify requests
+CREATE TABLE IF NOT EXISTS stock_notify_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id UUID REFERENCES products(id) ON DELETE SET NULL,
+  product_name VARCHAR(512),
+  brand_name VARCHAR(255),
+  product_image VARCHAR(1024),
+  requested_size VARCHAR(128),
+  email VARCHAR(255) NOT NULL,
+  wants_marketing BOOLEAN DEFAULT false,
+  status VARCHAR(32) DEFAULT 'pending',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stock_notify_email ON stock_notify_requests(email);
+CREATE INDEX IF NOT EXISTS idx_stock_notify_product_id ON stock_notify_requests(product_id);
+CREATE INDEX IF NOT EXISTS idx_stock_notify_status ON stock_notify_requests(status);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_stock_notify_unique
+  ON stock_notify_requests(product_id, requested_size, email)
+  WHERE deleted_at IS NULL;
 `
 ];
 
