@@ -7,6 +7,7 @@ const {
   fetchProductsPage,
   fetchProductById,
 } = require("./brandsgatewayHelper");
+const { getMarginSettings, computeTieredPricing } = require("../../../utils/marginHelper");
 
 const logger = pino({ level: process.env.IMPORT_LOG_LEVEL || "info" });
 
@@ -42,31 +43,6 @@ function normalizeGenderValue(value) {
   if (["kids", "children", "child"].includes(normalized)) return "kids";
   if (normalized.includes("unisex")) return "unisex";
   return normalized;
-}
-
-function computeTieredPricing(vendorSalePrice, vendorMrp) {
-  if (!vendorSalePrice || vendorSalePrice <= 0) {
-    return { ourPrice: null, ourMrp: null };
-  }
-
-  let markupPercentage;
-  if (vendorSalePrice > 1000) {
-    markupPercentage = 0.28;
-  } else if (vendorSalePrice >= 501) {
-    markupPercentage = 0.37;
-  } else {
-    markupPercentage = 0.45;
-  }
-
-  const ourPrice = Math.round(vendorSalePrice * (1 + markupPercentage));
-  let ourMrp = ourPrice;
-
-  if (vendorMrp && vendorMrp > vendorSalePrice) {
-    const vendorDiscount = (vendorMrp - vendorSalePrice) / vendorMrp;
-    ourMrp = Math.round(ourPrice / (1 - vendorDiscount));
-  }
-
-  return { ourPrice, ourMrp };
 }
 
 function resolveAttributeOption(attributes, predicate) {
@@ -137,7 +113,7 @@ function containsBlockedKeyword(value) {
   return BG_BLOCKED_KEYWORDS.some((kw) => normalized.includes(kw));
 }
 
-async function transformBrandsgatewayProduct(product) {
+async function transformBrandsgatewayProduct(product, marginConfig) {
   if (!product) return null;
 
   const blockedText = `${product?.name || ""} ${product?.description || ""}`;
@@ -180,7 +156,7 @@ async function transformBrandsgatewayProduct(product) {
       const regularPrice = variation.regular_price
         ? Number(variation.regular_price)
         : null;
-      const { ourPrice, ourMrp } = computeTieredPricing(salePrice, regularPrice);
+      const { ourPrice, ourMrp } = computeTieredPricing(salePrice, regularPrice, marginConfig);
 
       const variantSize =
         resolveAttributeOption(variation.attributes, (name) =>
@@ -233,7 +209,7 @@ async function transformBrandsgatewayProduct(product) {
     const regularPrice = product.regular_price
       ? Number(product.regular_price)
       : null;
-    const { ourPrice, ourMrp } = computeTieredPricing(salePrice, regularPrice);
+    const { ourPrice, ourMrp } = computeTieredPricing(salePrice, regularPrice, marginConfig);
 
     const variantSize = resolveAttributeOption(product.attributes, (name) =>
       name.includes("size")
@@ -388,7 +364,7 @@ async function upsertProductAndVariants(client, transformed) {
     let existing = null;
     if (product.productid) {
       const res = await client.query(
-        `SELECT id, default_category_id FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        `SELECT id, default_category_id, manually_edited_at FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
         [product.productid, BRANDS_GATEWAY_VENDOR_ID]
       );
       if (res.rowCount) existing = res.rows[0];
@@ -396,13 +372,31 @@ async function upsertProductAndVariants(client, transformed) {
 
     if (!existing && product.product_sku) {
       const res = await client.query(
-        `SELECT id, default_category_id FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        `SELECT id, default_category_id, manually_edited_at FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
         [product.product_sku, BRANDS_GATEWAY_VENDOR_ID]
       );
       if (res.rowCount) existing = res.rows[0];
     }
 
-    let productId = existing ? existing.id : randomUUID();
+    if (existing && existing.manually_edited_at) {
+      return { productId: existing.id, variantCount: 0, skipped: "manually_edited" };
+    }
+
+    const { checkAndMarkSuspiciousIfNeeded } = require("../competitorCheck");
+    const suspicious = await checkAndMarkSuspiciousIfNeeded(client, product, existing?.id);
+    if (suspicious) {
+      return { productId: existing?.id ?? null, variantCount: 0, skipped: "suspicious", reason: suspicious.reason };
+    }
+
+    let productId = existing ? existing.id : null;
+    if (!productId && product.productid) {
+      const deleted = await client.query(
+        `SELECT id FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NOT NULL LIMIT 1`,
+        [product.productid, BRANDS_GATEWAY_VENDOR_ID]
+      );
+      if (deleted.rowCount) return { productId: null, variantCount: 0, skipped: "deleted" };
+    }
+    if (!productId) productId = randomUUID();
 
     if (existing) {
       await client.query(
@@ -625,6 +619,8 @@ async function syncBrandsgatewayProducts(jobId) {
   const limiter = PLimit(concurrency);
   const pageDelayMs = 1100;
 
+  const marginConfig = await getMarginSettings(client, BRANDS_GATEWAY_VENDOR_ID);
+
   try {
     while (true) {
       const { items, total, totalPages } = await fetchProductsPage({
@@ -660,10 +656,12 @@ async function syncBrandsgatewayProducts(jobId) {
                 "🔎 Processing Brandsgateway product"
               );
             }
-            const transformed = await transformBrandsgatewayProduct(product);
+            const transformed = await transformBrandsgatewayProduct(product, marginConfig);
             if (!transformed) return;
             if (require("../excludedBrands").isBrandExcluded(transformed.product?.brand_name)) return;
-            await upsertProductAndVariants(client, transformed);
+            if (require("../kidsProductFilter").isKidsProduct(transformed.product)) return;
+            const result = await upsertProductAndVariants(client, transformed);
+            if (result && result.skipped) return;
             syncedProductIds.add(String(product.id));
             totalFetched += 1;
             successCount += 1;

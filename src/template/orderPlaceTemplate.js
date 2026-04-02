@@ -3,6 +3,7 @@ module.exports.generateOrderConfirmationEmail = ({
   orderId,
   items,
   currency = "€",
+  duty_percent = 0,
 }) => {
   // Validate input
   if (
@@ -15,8 +16,13 @@ module.exports.generateOrderConfirmationEmail = ({
       "Missing required parameters: customerName, orderId, and items array are required."
     );
   }
-console.log('order information in send mail', customerName, orderId, items, currency);
-  // Generate table rows dynamically
+  const duty = Number(duty_percent) || 0;
+  const rate = (item) => (item.exchange_rate != null ? Number(item.exchange_rate) : 1);
+  const displayPrice = (item) => {
+    const p = (item.price || 0) * rate(item);
+    return (duty > 0 ? p * (1 + duty / 100) : p).toFixed(2);
+  };
+  // Generate table rows dynamically (with duty applied)
   const tableRows = items
     .map(
       (item) => `
@@ -33,7 +39,7 @@ console.log('order information in send mail', customerName, orderId, items, curr
                 <h4>${item.qty}</h4>
             </td>
             <td>
-             <h4>${item.currency || "€"} ${((item.price || 0) * (item.exchange_rate || 1)).toFixed(2)}</h4>
+             <h4>${currency} ${displayPrice(item)}</h4>
             </td>
         </tr>`
     )
@@ -133,14 +139,14 @@ console.log('order information in send mail', customerName, orderId, items, curr
         <div class='container'>
             <div class='content'>
                 <center>
-                    <img class='logo' crossOrigin='anonymous' src='https://www.aayeu.com/assets/images/aayeu_logo.png' alt='Logo'>
+                    <img class='logo' crossOrigin='anonymous' src='https://www.aayeu.com/assets/images/aayeu-f-white.png' alt='Logo'>
                 </center> 
                 <h2 class='margin-zero' align='center'> 
                     Your order has been successfully received.
                 </h2>
                 <h3 class='margin-zero' align='center'>
                     Dear <span class='orange-clr'>${customerName},</span><br>
-                    Here's your receipt for <span class='orange-clr'>Order ID: ${orderId}</span>.
+                    Thank you for your order <span class='orange-clr'>ID: ${orderId}</span>.
                 </h3>
                 <br>
 

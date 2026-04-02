@@ -115,6 +115,7 @@ module.exports.getOurCategories = catchAsync(async (req, res, next) => {
                 is_our_category: !!node.is_our_category,
                 our_category: node.our_category || null,
                 priority: node.priority || null,
+                image_url: node.image_url || null,
                 children: []
             });
         }
@@ -231,6 +232,7 @@ module.exports.getAllCategories = catchAsync(async (req, res, next) => {
                 our_category: node.our_category || null,
                 vendor_id: node.vendor_id || null,
                 priority: node.priority || null,
+                image_url: node.image_url || null,
                 children: []
             });
         }
@@ -271,7 +273,7 @@ module.exports.getAllCategories = catchAsync(async (req, res, next) => {
 module.exports.editCategory = catchAsync(async (req, res, next) => {
     const client = await dbPool.connect();
     try {
-        const { category_id, name, slug, parent_id = null, metadata = null, is_active = true, priority } = req.body;
+        const { category_id, name, slug, parent_id = null, metadata = null, is_active = true, priority, image_url } = req.body;
 
         if (!category_id || !isValidUUID(category_id)) {
             return next(new AppError('Valid category id is required', 400));
@@ -313,7 +315,7 @@ module.exports.editCategory = catchAsync(async (req, res, next) => {
         // Update category
         const updatedCategory = await CategoryService.updateCategory(
             category_id,
-            { name, slug, parent_id, metadata, is_active, priority },
+            { name, slug, parent_id, metadata, is_active, priority, image_url },
             client
         );
 

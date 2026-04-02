@@ -499,6 +499,7 @@ SELECT
         'vendor_order_status', oi.vendor_order_status,
         'vendor_order_id', oi.vendor_order_id,
         'vendor_reference_number', oi.vendor_reference_number,
+        'vendor_paid_at', oi.vendor_paid_at,
         'tracking_codes', oi.tracking_codes,
         'product', jsonb_build_object(
           'id', prod.id,
@@ -522,7 +523,8 @@ SELECT
           'id', v.id,
           'name', v.name,
           'slug', v.slug,
-          'contact_email', v.contact_email
+          'contact_email', v.contact_email,
+          'merchant_dashboard_url', v.merchant_dashboard_url
         )
       )
     ) FILTER (WHERE oi.id IS NOT NULL),
@@ -649,6 +651,7 @@ LIMIT 1;
         vendor_order_status: it.vendor_order_status || 'pending',
         vendor_order_id: it.vendor_order_id || null,
         vendor_reference_number: it.vendor_reference_number || null,
+        vendor_paid_at: it.vendor_paid_at || null,
         tracking_codes: it.tracking_codes || [],
       })),
     };

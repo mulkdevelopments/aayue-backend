@@ -7,6 +7,7 @@
 const dbPool = require('../../db/dbConnection');
 const LuxuryDistributionService = require('./LuxuryDistributionService');
 const BrandsgatewayService = require('./BrandsgatewayService');
+const BdroppyOrderService = require('./BdroppyOrderService');
 const ManualVendorService = require('./ManualVendorService');
 
 class VendorServiceFactory {
@@ -75,8 +76,8 @@ class VendorServiceFactory {
    */
   static getApiVendorService(vendor) {
     // Map vendor name to service class
-    // In future, you can add more vendors here
-    const vendorNameLower = vendor.name.toLowerCase();
+    const vendorNameLower = (vendor.name || '').toLowerCase();
+    const vendorId = (vendor.id || '').toLowerCase();
 
     if (vendorNameLower.includes('luxury-distribution') || vendorNameLower.includes('luxury distribution')) {
       return new LuxuryDistributionService(vendor.id, vendor.name, vendor.capabilities);
@@ -84,6 +85,10 @@ class VendorServiceFactory {
 
     if (vendorNameLower.includes('brandsgateway')) {
       return new BrandsgatewayService(vendor.id, vendor.name, vendor.capabilities);
+    }
+
+    if (vendorNameLower.includes('bdroppy') || vendorId === 'a6bdd96b-0e2c-4f3e-b644-4e088b1778e0'.toLowerCase()) {
+      return new BdroppyOrderService(vendor.id, vendor.name, vendor.capabilities);
     }
 
     // Add more API vendors here in future:

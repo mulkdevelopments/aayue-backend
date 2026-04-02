@@ -549,7 +549,7 @@ WHERE NOT EXISTS (SELECT 1 FROM home_sections s WHERE s.key = v.k);
   `-- Home banners table for managing homepage banners
 CREATE TABLE IF NOT EXISTS home_banners (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  slot VARCHAR(100) NOT NULL UNIQUE,        -- 'top-banner', 'below-top-banner', 'middle-banner', 'bottom-top-banner', 'bottom-left-banner'
+  slot VARCHAR(100) NOT NULL UNIQUE,        -- 'top-banner', 'below-top-banner', 'middle-banner', 'bottom-top-banner', 'bottom-left-banner', 'bottom-right-banner'
   media_type VARCHAR(50),                   -- 'image' | 'video'
   media_url TEXT,                           -- URL to the media file
   title VARCHAR(255),                       -- Optional title text
@@ -727,7 +727,59 @@ CREATE INDEX IF NOT EXISTS idx_stock_notify_status ON stock_notify_requests(stat
 CREATE UNIQUE INDEX IF NOT EXISTS ux_stock_notify_unique
   ON stock_notify_requests(product_id, requested_size, email)
   WHERE deleted_at IS NULL;
-`
+`,
+
+  `-- Hero section slides (homepage hero carousel: title, description, image, CTA link)
+CREATE TABLE IF NOT EXISTS hero_slides (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  image_url TEXT,
+  redirect_url VARCHAR(1024) DEFAULT '/shop',
+  sort_order INT DEFAULT 0,
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hero_slides_active ON hero_slides(is_active);
+CREATE INDEX IF NOT EXISTS idx_hero_slides_sort_order ON hero_slides(sort_order);
+`,
+
+  `-- Custom duties per currency (display-only on frontend; e.g. 42% for India)
+CREATE TABLE IF NOT EXISTS custom_duties (
+  currency_code VARCHAR(10) PRIMARY KEY,
+  duty_percent NUMERIC(6,2) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+COMMENT ON TABLE custom_duties IS 'Custom duty percentage per country/currency for frontend price display (e.g. 42 for India).';
+`,
+
+  `-- Homepage brand highlight tiles (admin: brand + portrait image → shop link)
+CREATE TABLE IF NOT EXISTS brand_highlights (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  brand_name VARCHAR(255) NOT NULL,
+  display_label VARCHAR(255),
+  image_url TEXT NOT NULL,
+  link_url VARCHAR(1024),
+  sort_order INT DEFAULT 0,
+  active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+  deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_brand_highlights_active ON brand_highlights(active);
+CREATE INDEX IF NOT EXISTS idx_brand_highlights_sort ON brand_highlights(sort_order);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_brand_highlights_brand_alive
+  ON brand_highlights (lower(trim(brand_name)))
+  WHERE deleted_at IS NULL;
+COMMENT ON TABLE brand_highlights IS 'Curated brand tiles on homepage; brand_name matches catalog.';
+`,
+
+  `-- Perf: product_our_category_map for getDynamicFilters / PLP (category-scoped joins)
+CREATE INDEX IF NOT EXISTS idx_pom_our_category_id ON product_our_category_map(our_category_id);
+CREATE INDEX IF NOT EXISTS idx_pom_product_id ON product_our_category_map(product_id);
+`,
 ];
 
 module.exports = migrationFiles;

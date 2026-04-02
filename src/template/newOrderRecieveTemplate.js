@@ -5,6 +5,7 @@ module.exports.generateAdminNewOrderEmail = ({
   orderId,
   items,
   currency = "€",
+  duty_percent = 0,
 }) => {
   if (
     !customerName ||
@@ -14,6 +15,13 @@ module.exports.generateAdminNewOrderEmail = ({
   ) {
     throw new Error("Missing required parameters for admin new order email.");
   }
+
+  const duty = Number(duty_percent) || 0;
+  const rate = (item) => (item.exchange_rate != null ? Number(item.exchange_rate) : 1);
+  const displayPrice = (item) => {
+    const p = (item.price || 0) * rate(item);
+    return (duty > 0 ? p * (1 + duty / 100) : p).toFixed(2);
+  };
 
   const tableRows = items
     .map(
@@ -31,7 +39,7 @@ module.exports.generateAdminNewOrderEmail = ({
                 <h4>${item.qty}</h4>
             </td>
             <td>
-                <h4>${currency} ${parseFloat(item.price).toFixed(2)}</h4>
+                <h4>${currency} ${displayPrice(item)}</h4>
             </td>
         </tr>`
     )

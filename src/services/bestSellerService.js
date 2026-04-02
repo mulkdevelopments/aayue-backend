@@ -77,9 +77,13 @@ const BestSellerService = {
         const whereSQL = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
         const sql = `
-      SELECT bs.*, p.product_sku, p.name AS product_name, p.title, p.product_img, p.default_category_id
+      SELECT bs.*, p.product_sku, p.name AS product_name, p.title, p.product_img, p.default_category_id,
+        p.is_active AS product_is_active,
+        p.deleted_at AS product_deleted_at,
+        (p.vendor_id IS NULL OR (v.id IS NOT NULL AND v.status = 'active' AND v.deleted_at IS NULL)) AS vendor_active
       FROM best_sellers bs
       JOIN products p ON p.id = bs.product_id AND p.deleted_at IS NULL
+      LEFT JOIN vendors v ON v.id = p.vendor_id
       ${whereSQL}
       ORDER BY bs.rank ASC NULLS LAST, bs.created_at DESC
       LIMIT $${idx} OFFSET $${idx + 1}
@@ -88,14 +92,53 @@ const BestSellerService = {
         params.push(offset);
 
         const { rows } = await client.query(sql, params);
-        return rows;
+        // Compute whether each row would appear on frontend (same logic as getActiveBestSellers)
+        return rows.map((r) => {
+            let frontend_visible = true;
+            let frontend_hidden_reason = null;
+            if (!r.active) {
+                frontend_visible = false;
+                frontend_hidden_reason = 'Best seller inactive';
+            } else if (r.start_at && new Date(r.start_at) > now) {
+                frontend_visible = false;
+                frontend_hidden_reason = 'Not started yet';
+            } else if (r.end_at && new Date(r.end_at) < now) {
+                frontend_visible = false;
+                frontend_hidden_reason = 'Ended';
+            } else if (r.product_deleted_at) {
+                frontend_visible = false;
+                frontend_hidden_reason = 'Product deleted';
+            } else if (r.product_is_active === false) {
+                frontend_visible = false;
+                frontend_hidden_reason = 'Product inactive';
+            } else if (r.vendor_active === false) {
+                frontend_visible = false;
+                frontend_hidden_reason = 'Vendor inactive';
+            }
+            return { ...r, frontend_visible, frontend_hidden_reason };
+        });
     },
 
     async getActiveBestSellers({ limit = 20, offset = 0 }, client) {
-        // returns enriched product rows (basic product info + aggregated variants nested inside product)
+        // Returns enriched product rows. Only aggregate variants for best_seller products (not all products).
         const now = new Date();
         const sql = `
-    WITH variant_agg AS (
+    WITH active_best_sellers AS (
+      SELECT bs.id AS best_seller_id, bs.rank, bs.meta, bs.product_id
+      FROM best_sellers bs
+      JOIN products p ON p.id = bs.product_id AND p.deleted_at IS NULL AND p.is_active = true
+      WHERE bs.deleted_at IS NULL
+        AND bs.active = true
+        AND (bs.start_at IS NULL OR bs.start_at <= $1)
+        AND (bs.end_at IS NULL OR bs.end_at >= $1)
+        AND (p.vendor_id IS NULL OR EXISTS (
+          SELECT 1 FROM vendors v
+          WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL
+        ))
+      ORDER BY bs.rank ASC NULLS LAST, bs.created_at DESC
+      LIMIT $2 OFFSET $3
+    ),
+    variant_agg AS (
       SELECT
         p.id AS product_id,
         COALESCE(
@@ -115,34 +158,23 @@ const BestSellerService = {
           ) FILTER (WHERE pv.id IS NOT NULL),
           '[]'::jsonb
         ) AS variants
-      FROM products p
+      FROM active_best_sellers abs
+      JOIN products p ON p.id = abs.product_id
       LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
       GROUP BY p.id
     )
     SELECT
-      bs.id AS best_seller_id,
-      bs.rank,
-      bs.meta,
-      -- build product json and attach variants from the CTE
+      abs.best_seller_id,
+      abs.rank,
+      abs.meta,
       (
         (to_jsonb(p.*) - 'attributes' - 'product_meta' - 'videos')
-        || jsonb_build_object('variants', va.variants)
+        || jsonb_build_object('variants', COALESCE(va.variants, '[]'::jsonb))
       ) AS product
-    FROM best_sellers bs
-    JOIN products p ON p.id = bs.product_id AND p.deleted_at IS NULL
+    FROM active_best_sellers abs
+    JOIN products p ON p.id = abs.product_id
     LEFT JOIN variant_agg va ON va.product_id = p.id
-    WHERE bs.deleted_at IS NULL
-      AND bs.active = true
-      AND (bs.start_at IS NULL OR bs.start_at <= $1)
-      AND (bs.end_at IS NULL OR bs.end_at >= $1)
-      AND (p.vendor_id IS NULL OR EXISTS (
-        SELECT 1 FROM vendors v
-        WHERE v.id = p.vendor_id
-          AND v.status = 'active'
-          AND v.deleted_at IS NULL
-      ))
-    ORDER BY bs.rank ASC NULLS LAST, bs.created_at DESC
-    LIMIT $2 OFFSET $3
+    ORDER BY abs.rank ASC NULLS LAST
   `;
         const { rows } = await client.query(sql, [now, limit, offset]);
         return rows;

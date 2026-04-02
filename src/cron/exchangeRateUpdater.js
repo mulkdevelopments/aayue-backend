@@ -27,10 +27,9 @@ async function updateExchangeRates() {
     }
 
     const rates = response.data.rates;
+    const toUpdate = ['AED', 'SAR', 'QAR', 'KWD', 'OMR', 'BHD', 'INR', 'PKR'];
     console.log(`✅ Fetched exchange rates (base: EUR)`);
-    console.log(`   → AED: ${rates.AED}`);
-    console.log(`   → INR: ${rates.INR}`);
-    console.log(`   → PKR: ${rates.PKR}`);
+    toUpdate.forEach((c) => console.log(`   → ${c}: ${rates[c] ?? 'N/A'}`));
 
     // Update database with new rates
     const client = await dbPool.connect();
@@ -38,29 +37,16 @@ async function updateExchangeRates() {
     try {
       await client.query('BEGIN');
 
-      // Update AED
-      await client.query(`
-        INSERT INTO currency_exchange_rates (from_currency, to_currency, rate, updated_at)
-        VALUES ('EUR', 'AED', $1, NOW())
-        ON CONFLICT (from_currency, to_currency)
-        DO UPDATE SET rate = $1, updated_at = NOW()
-      `, [rates.AED]);
-
-      // Update INR
-      await client.query(`
-        INSERT INTO currency_exchange_rates (from_currency, to_currency, rate, updated_at)
-        VALUES ('EUR', 'INR', $1, NOW())
-        ON CONFLICT (from_currency, to_currency)
-        DO UPDATE SET rate = $1, updated_at = NOW()
-      `, [rates.INR]);
-
-      // Update PKR
-      await client.query(`
-        INSERT INTO currency_exchange_rates (from_currency, to_currency, rate, updated_at)
-        VALUES ('EUR', 'PKR', $1, NOW())
-        ON CONFLICT (from_currency, to_currency)
-        DO UPDATE SET rate = $1, updated_at = NOW()
-      `, [rates.PKR]);
+      for (const toCurrency of toUpdate) {
+        const rate = rates[toCurrency];
+        if (rate == null) continue;
+        await client.query(`
+          INSERT INTO currency_exchange_rates (from_currency, to_currency, rate, updated_at)
+          VALUES ('EUR', $1, $2, NOW())
+          ON CONFLICT (from_currency, to_currency)
+          DO UPDATE SET rate = $2, updated_at = NOW()
+        `, [toCurrency, rate]);
+      }
 
       await client.query('COMMIT');
       console.log('✅ Exchange rates updated in database\n');

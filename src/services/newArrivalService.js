@@ -54,15 +54,45 @@ const NewArrivalService = {
 
     const whereSQL = `WHERE ${where.join(' AND ')}`;
     const sql = `
-      SELECT na.*
+      SELECT na.*,
+        p.product_sku, p.name AS product_name, p.product_img,
+        p.is_active AS product_is_active,
+        p.deleted_at AS product_deleted_at,
+        (p.vendor_id IS NULL OR (v.id IS NOT NULL AND v.status = 'active' AND v.deleted_at IS NULL)) AS vendor_active
       FROM new_arrivals na
+      JOIN products p ON p.id = na.product_id AND p.deleted_at IS NULL
+      LEFT JOIN vendors v ON v.id = p.vendor_id
       ${whereSQL}
       ORDER BY na.rank ASC NULLS LAST, na.created_at DESC
       LIMIT $${idx} OFFSET $${idx + 1}
     `;
     params.push(limit, offset);
     const { rows } = await client.query(sql, params);
-    return rows;
+    // Compute whether each row would appear on frontend (same logic as fetchActiveNewArrivals)
+    return rows.map((r) => {
+      let frontend_visible = true;
+      let frontend_hidden_reason = null;
+      if (!r.active) {
+        frontend_visible = false;
+        frontend_hidden_reason = 'New arrival inactive';
+      } else if (r.start_at && new Date(r.start_at) > now) {
+        frontend_visible = false;
+        frontend_hidden_reason = 'Not started yet';
+      } else if (r.end_at && new Date(r.end_at) < now) {
+        frontend_visible = false;
+        frontend_hidden_reason = 'Ended';
+      } else if (r.product_deleted_at) {
+        frontend_visible = false;
+        frontend_hidden_reason = 'Product deleted';
+      } else if (r.product_is_active === false) {
+        frontend_visible = false;
+        frontend_hidden_reason = 'Product inactive';
+      } else if (r.vendor_active === false) {
+        frontend_visible = false;
+        frontend_hidden_reason = 'Vendor inactive';
+      }
+      return { ...r, frontend_visible, frontend_hidden_reason };
+    });
   },
 
   /**
@@ -101,6 +131,7 @@ const NewArrivalService = {
           FROM products p
           WHERE p.id = na.product_id
             AND p.deleted_at IS NULL
+            AND p.is_active = true
             AND (p.vendor_id IS NULL OR EXISTS (
               SELECT 1 FROM vendors v
               WHERE v.id = p.vendor_id

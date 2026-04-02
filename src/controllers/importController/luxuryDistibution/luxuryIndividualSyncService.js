@@ -88,6 +88,13 @@ module.exports.syncIndividualLuxuryProduct = catchAsync(async (req, res, next) =
         skipped: true,
       });
     }
+    if (require("../kidsProductFilter").isKidsProduct(transformed.product)) {
+      return sendResponse(res, 200, true, "Product skipped (kids product not imported)", {
+        productId: productId || null,
+        vendorProductId: supplierProductId,
+        skipped: true,
+      });
+    }
     const { product, variants } = transformed;
 
     // Sync the product using existing sync logic

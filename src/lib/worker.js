@@ -23,12 +23,12 @@ const worker = new Worker(
       return await sendOrderConfirmation(job.data.to, job.data.orderData);
     }
 
-    // if (job.name === "sendAdminEmail") {
-    //   return await sendNewOrderNotificationEmail(
-    //     job.data.toList,
-    //     job.data.orderData
-    //   );
-    // }
+    if (job.name === "sendAdminEmail") {
+      return await sendNewOrderNotificationEmail(
+        job.data.toList,
+        job.data.orderData
+      );
+    }
 
     // if (job.name === "sendInvoiceEmail") {
     //   console.log("Generating PDF for Order #", job.data.orderNo);

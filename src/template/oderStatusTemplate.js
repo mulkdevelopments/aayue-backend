@@ -4,6 +4,7 @@ module.exports.generateOrderStatusEmail = ({
   items,
   status, // processing, shipped, delivered, cancelled
   currency = "€",
+  duty_percent = 0,
 }) => {
   console.log(
     customerName,
@@ -49,7 +50,14 @@ module.exports.generateOrderStatusEmail = ({
 
   const { title, message } = STATUS_MESSAGES[status];
 
-  // ITEMS TABLE
+  const exchangeRate = typeof items[0]?.exchange_rate === "number" ? items[0].exchange_rate : (items[0]?.exchange_rate != null ? Number(items[0].exchange_rate) : 1);
+  const duty = Number(typeof duty_percent !== "undefined" ? duty_percent : 0) || 0;
+  const displayPrice = (item) => {
+    const p = (item.price || 0) * exchangeRate;
+    return (duty > 0 ? p * (1 + duty / 100) : p).toFixed(2);
+  };
+
+  // ITEMS TABLE (with duty applied)
   const tableRows = items
     .map(
       (item) => `
@@ -61,7 +69,7 @@ module.exports.generateOrderStatusEmail = ({
           </td>
           <td><h4>${item.name}</h4></td>
           <td><h4>${item.qty}</h4></td>
-          <td><h4>${currency} ${parseFloat(item.price).toFixed(2)}</h4></td>
+          <td><h4>${currency} ${displayPrice(item)}</h4></td>
         </tr>`
     )
     .join("");

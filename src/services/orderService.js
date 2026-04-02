@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const puppeteer = require("puppeteer");
 const { generateInvoiceHTML } = require("../template/generateInvoiceHtml");
+const { getCustomDutyForCurrency, toDisplayAmount } = require("../utils/customDutyHelper");
 
 const slugify = (text) =>
   text
@@ -156,6 +157,12 @@ const OrderService = {
     if (currentPaymentStatus === "paid") {
       return { alreadyPaid: true };
     }
+    const ps = String(currentPaymentStatus || "").toLowerCase();
+    if (
+      ["refund_completed", "refund_initiated", "refunded"].includes(ps)
+    ) {
+      return { skippedRefundState: true };
+    }
 // ------------------------------------------------------------------------------------------------------------------
     // ⚠️ STOCK REDUCTION COMMENTED OUT - Re-enable when inventory management is ready
     // lock each variant and decrement stock
@@ -206,7 +213,7 @@ const OrderService = {
   async getUserPaidOrders(options = {}, client) {
     const {
       user_id,
-      status = "paid",
+      status = "paid_or_refunded",
       from_date = null,
       to_date = null,
       limit = 20,
@@ -217,11 +224,19 @@ const OrderService = {
     const params = [user_id];
     let idx = 2;
 
-    // payment status filter (exact match) - skip if status is 'all'
-    if (status && status.toLowerCase() !== 'all') {
-      where.push(`o.payment_status = $${idx}`);
-      params.push(status);
-      idx++;
+    // payment_status filter (legacy query param: order_status on controller)
+    // all = no filter; paid_or_refunded = paid + returned/refunded; else exact match
+    const st = status ? String(status).toLowerCase() : "";
+    if (st && st !== "all") {
+      if (st === "paid_or_refunded") {
+        where.push(
+          `LOWER(TRIM(o.payment_status)) IN ('paid','refund_completed','refund_initiated','refunded')`
+        );
+      } else {
+        where.push(`o.payment_status = $${idx}`);
+        params.push(status);
+        idx++;
+      }
     }
 
     // date filters (created_at)
@@ -410,6 +425,10 @@ const OrderService = {
             'qty', oi.qty,
             'price', oi.price,
             'vendor_id', oi.vendor_id,
+            'vendor_name', v.name,
+            'vendor_order_status', oi.vendor_order_status,
+            'vendor_paid_at', oi.vendor_paid_at,
+            'tracking_codes', oi.tracking_codes,
             'invoice_pdf_path', o.invoice_pdf_path,
             'product', jsonb_build_object(
               'id', p.id,
@@ -434,6 +453,7 @@ const OrderService = {
     LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.deleted_at IS NULL
     LEFT JOIN product_variants pv ON pv.id = oi.variant_id AND pv.deleted_at IS NULL
     LEFT JOIN products p ON p.id = pv.product_id AND p.deleted_at IS NULL
+    LEFT JOIN vendors v ON v.id = oi.vendor_id AND v.deleted_at IS NULL
     WHERE o.id = $1 AND o.user_id = $2 AND o.deleted_at IS NULL
     GROUP BY 
       o.id,
@@ -472,16 +492,24 @@ const OrderService = {
         qty: it.qty,
         price: it.price !== null ? Number(it.price) : null,
         vendor_id: it.vendor_id,
+        vendor_name: it.vendor_name || null,
+        vendor_order_status: it.vendor_order_status || null,
+        vendor_paid_at: it.vendor_paid_at || null,
+        tracking_codes: it.tracking_codes || [],
         product: it.product,
         variant: it.variant,
       })),
+      can_cancel_order:
+        String(r.order_status || "").toLowerCase() === "processing" &&
+        String(r.payment_status || "").toLowerCase() === "paid" &&
+        !(Array.isArray(r.items) ? r.items : []).some((it) => it.vendor_paid_at != null),
     };
   },
 
   async getOrGenerateInvoice({ user_id, order_id }, client, res) {
-    // 1️⃣ Fetch order
+    // 1️⃣ Fetch order (with currency for display)
     const { rows } = await client.query(
-      `SELECT id, user_id, order_no, invoice_pdf_path
+      `SELECT id, user_id, order_no, invoice_pdf_path, currency, exchange_rate, currency_symbol
        FROM orders
        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
       [order_id, user_id]
@@ -512,6 +540,9 @@ const OrderService = {
         o.payment_status,
         o.order_no,
         o.created_at,
+        o.currency,
+        o.exchange_rate,
+        o.currency_symbol,
         u.full_name AS customer_name,
         u.email AS customer_email
       FROM order_items oi
@@ -526,6 +557,26 @@ const OrderService = {
 
     if (items.length === 0) throw new Error("Order items not found");
 
+    const orderCurrency = items[0].currency || "AED";
+    const exchangeRate = items[0].exchange_rate != null ? Number(items[0].exchange_rate) : 1;
+    const currencySymbol = items[0].currency_symbol || "€";
+    const dutyPercent = await getCustomDutyForCurrency(client, orderCurrency);
+
+    const invoiceItems = items.map((i) => {
+      const unitDisplay = toDisplayAmount(Number(i.price), exchangeRate, dutyPercent);
+      const lineTotal = unitDisplay * Number(i.qty);
+      return {
+        sku: i.sku,
+        product_name: i.name,
+        size: i.size || "-",
+        qty: i.qty,
+        unitPrice: unitDisplay.toFixed(2),
+        total: lineTotal.toFixed(2),
+      };
+    });
+    const subtotalDisplay = invoiceItems.reduce((acc, i) => acc + Number(i.total), 0);
+    const grandTotalDisplay = subtotalDisplay;
+
     const invoiceData = {
       orderId: order.order_no,
       orderDate: new Date(items[0].created_at).toLocaleDateString("en-IN", {
@@ -535,20 +586,17 @@ const OrderService = {
       }),
       invoiceStatus: "PAID",
       paymentStatus: items[0].payment_status,
-      subtotal: items
-        .reduce((acc, item) => acc + item.price * item.qty, 0)
-        .toFixed(2),
+      currency_symbol: currencySymbol,
+      subtotal: subtotalDisplay.toFixed(2),
       shipping: "0.00",
-      grandTotal: items
-        .reduce((acc, item) => acc + item.price * item.qty, 0)
-        .toFixed(2),
+      grandTotal: grandTotalDisplay.toFixed(2),
       company: {
-        name: "FTVAAYEU",
+        name: "AAYEU",
         address:
           "Office 304, Al Saqr Tower Sheikh Zayed Road, Trade Centre 1 Dubai",
         email: "support@ftvaayeu.com",
         phone: "+971-50-1234567",
-        logo: "https://yourdomain.com/files/logo.png",
+        logo: "https://www.aayeu.com/assets/images/aayeu_logo.png",
       },
       customer: {
         name: items[0].customer_name,
@@ -556,14 +604,7 @@ const OrderService = {
         address: "Address not available",
         phone: "N/A",
       },
-      items: items.map((i) => ({
-        sku: i.sku,
-        product_name: i.name,
-        size: i.size || "-",
-        qty: i.qty,
-        unitPrice: Number(i.price).toFixed(2),
-        total: (i.qty * Number(i.price)).toFixed(2),
-      })),
+      items: invoiceItems,
     };
 
     // 4️⃣ Generate HTML

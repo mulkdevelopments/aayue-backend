@@ -8,7 +8,7 @@ module.exports.getActiveNewArrivals = catchAsync(async (req, res, next) => {
     const client = await dbPool.connect();
     try {
         const page = Math.max(1, parseInt(req.query.page || '1', 10));
-        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || '20', 10)));
+        const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '100', 10)));
         const offset = (page - 1) * limit;
 
         const rows = await NewArrivalService.fetchActiveNewArrivals({ limit, offset }, client);

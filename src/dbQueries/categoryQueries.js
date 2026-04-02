@@ -27,7 +27,7 @@ const categoryQueries = {
     `
     */
   // in categoryQueries (extend selected fields)
-  getById: `SELECT id, name, slug, parent_id, lft, rgt, path, our_category, is_our_category, metadata FROM categories WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+  getById: `SELECT id, name, slug, parent_id, lft, rgt, path, our_category, is_our_category, metadata, image_url FROM categories WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
 
   // ensure insert returns new fields
   insertCategory: `
@@ -46,8 +46,8 @@ const categoryQueries = {
     metadata = $7,
     our_category = $8,
     is_our_category = $9,
-    priority = $10
-
+    priority = $10,
+    image_url = $11
   WHERE id = $1
   RETURNING *
 `

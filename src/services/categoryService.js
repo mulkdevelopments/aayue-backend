@@ -75,7 +75,7 @@ const CategoryService = {
     // service
     async getOnlyOurCategories(client) {
         const { rows } = await client.query(`
-        SELECT id, name, slug, parent_id, lft, rgt, path, is_active, metadata, our_category, is_our_category,priority
+        SELECT id, name, slug, parent_id, lft, rgt, path, is_active, metadata, our_category, is_our_category, priority, image_url
         FROM categories
         WHERE deleted_at IS NULL
           AND is_our_category = TRUE
@@ -124,7 +124,7 @@ const CategoryService = {
         return rows;
     },
     // inside CategoryService object
-    async updateCategory(id, { name, slug, parent_id = null, metadata = null, is_active = true, priority }, client) {
+    async updateCategory(id, { name, slug, parent_id = null, metadata = null, is_active = true, priority, image_url }, client) {
         // Fetch existing category
         const { rows: existingRows } = await client.query(categoryQueries.getById, [id]);
         const existing = existingRows[0];
@@ -153,7 +153,8 @@ const CategoryService = {
             metadata ? JSON.stringify(metadata) : null,
             existing.our_category,
             existing.is_our_category,
-            priority
+            priority,
+            image_url !== undefined ? image_url : existing.image_url
         ]);
         return rows[0];
     },
@@ -301,7 +302,31 @@ const CategoryService = {
             [imageUrl, id]
         );
         return rows[0];
-    }
+    },
+
+    /**
+     * Our-category root + all descendant our-category ids (nested set).
+     * @returns {Promise<{ root: { id, name }, ids: string[] } | null>} null if root missing or not our category
+     */
+    async getOurCategorySubtreeRootAndIds(rootOurCategoryId) {
+        const { rows: roots } = await dbPool.query(
+            `SELECT id, name, lft, rgt FROM categories
+       WHERE id = $1::uuid AND deleted_at IS NULL AND is_our_category = TRUE`,
+            [rootOurCategoryId]
+        );
+        if (!roots.length) return null;
+        const root = roots[0];
+        const { rows } = await dbPool.query(
+            `SELECT c.id FROM categories c
+       WHERE c.deleted_at IS NULL AND c.is_our_category = TRUE
+         AND c.lft >= $1 AND c.rgt <= $2`,
+            [root.lft, root.rgt]
+        );
+        return {
+            root: { id: root.id, name: root.name },
+            ids: rows.map((r) => r.id),
+        };
+    },
 };
 
 module.exports = CategoryService;

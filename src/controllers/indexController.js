@@ -6,6 +6,8 @@ const brandSpotlightController = require("./adminController/brandSpotlightContro
 const userBrandSpotlightController = require("./userController/brandSpotlightController");
 const brandGroupController = require("./adminController/brandGroupController");
 const userBrandGroupController = require("./userController/brandGroupController");
+const brandHighlightController = require("./adminController/brandHighlightController");
+const userBrandHighlightController = require("./userController/brandHighlightController");
 const adminNewArrivalController = require("./adminController/newArrivalController");
 const userNewArrivalController = require("./userController/newArrivalController");
 const uploadController = require("./uploadController");
@@ -31,9 +33,17 @@ const contactUsController = require("./contactUsController/contactUs");
 const newsLetterController = require("./newsLetterController/newsletterController");
 const stockNotifyController = require("./stockNotifyController/stockNotifyController");
 const aboutUsController = require("./adminController/aboutUsController");
+const pageContentController = require("./adminController/pageContentController");
 const aiSuggestionController = require("./adminController/aiSuggestionController");
 const autoMapController = require("./adminController/autoMapController");
+const remapCategoryController = require("./adminController/remapCategoryController");
+const descriptionRewriteController = require("./adminController/descriptionRewriteController");
+const productNameRewriteController = require("./adminController/productNameRewriteController");
+const agentsController = require("./adminController/agentsController");
 const accessRequestController = require("./accessRequestController");
+const heroSlideController = require("./adminController/heroSlideController");
+const userHeroSlideController = require("./userController/heroSlideController");
+const adminManagementController = require("./adminController/adminManagementController");
 
 const indexCtrl = {
   userAuthController,
@@ -44,6 +54,8 @@ const indexCtrl = {
   userBrandSpotlightController,
   brandGroupController,
   userBrandGroupController,
+  brandHighlightController,
+  userBrandHighlightController,
   adminNewArrivalController,
   userNewArrivalController,
   uploadController,
@@ -69,9 +81,17 @@ const indexCtrl = {
   newsLetterController,
   stockNotifyController,
   aboutUsController,
+  pageContentController,
   aiSuggestionController,
   autoMapController,
+  remapCategoryController,
+  descriptionRewriteController,
+  productNameRewriteController,
+  agentsController,
   accessRequestController,
+  heroSlideController,
+  userHeroSlideController,
+  adminManagementController,
 };
 
 module.exports = indexCtrl;

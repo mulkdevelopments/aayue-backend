@@ -34,6 +34,7 @@ class BrandsgatewayService extends BaseVendorService {
     this.capabilities = {
       ...(capabilities || {}),
       has_order_placement_api: true,
+      has_order_tracking_api: true,
     };
   }
 
@@ -80,19 +81,37 @@ class BrandsgatewayService extends BaseVendorService {
         response: data,
       };
     } catch (error) {
+      const status = error.response?.status;
+      const data = error.response?.data || {};
+      const message = data?.message || data?.error || error.message;
+
+      // 422 "order id has already been taken" on retry: order was already placed; treat as success with existing id
+      const orderIdMsg = [message, data?.errors?.order_id].flat().filter(Boolean).join(" ");
+      const orderIdAlreadyTaken =
+        status === 422 &&
+        String(orderIdMsg).toLowerCase().includes("order id") &&
+        String(orderIdMsg).toLowerCase().includes("already been taken");
+      if (orderIdAlreadyTaken && orderData.existingVendorOrderId) {
+        console.log(`   ℹ️  [${this.vendorName}] Order already placed (order id taken); keeping vendor order ID: ${orderData.existingVendorOrderId}`);
+        return {
+          success: true,
+          vendorOrderId: String(orderData.existingVendorOrderId),
+          vendorReference: orderData.orderNo || orderData.orderId,
+          message: "Order already placed with vendor",
+          response: data,
+        };
+      }
+
       if (error.response) {
         console.error(
-          `❌ [${this.vendorName}] API Error ${error.response.status}:`,
-          error.response.data
+          `❌ [${this.vendorName}] API Error ${status}:`,
+          data
         );
       } else {
         console.error(`❌ [${this.vendorName}] API Error:`, error.message);
       }
       const errorMessage =
-        error.response?.data?.message ||
-        error.response?.data?.error ||
-        error.message ||
-        "Brandsgateway order placement failed";
+        message || "Brandsgateway order placement failed";
 
       return {
         success: false,
@@ -170,9 +189,46 @@ class BrandsgatewayService extends BaseVendorService {
     };
   }
 
-  async getTracking() {
-    // Brandsgateway tracking API not implemented yet
-    return [];
+  /**
+   * GET /orders/{order_id}?store_id=… — response includes tracking_info[]:
+   * { company, number, vendor_id, line_items[] }
+   */
+  async getTracking(vendorOrderId) {
+    if (!vendorOrderId || !STORE_ID) return [];
+
+    try {
+      const client = getApiClient();
+      const response = await requestWithRetry(() =>
+        client.get(`/orders/${encodeURIComponent(String(vendorOrderId))}`, {
+          params: { store_id: STORE_ID },
+        })
+      );
+      const data = response?.data || {};
+      const infos = Array.isArray(data.tracking_info) ? data.tracking_info : [];
+      const tracking = [];
+      for (const row of infos) {
+        const num =
+          row.number ?? row.tracking_number ?? row.trackingNumber ?? row.tracking_code;
+        if (!num) continue;
+        tracking.push({
+          trackingCode: String(num),
+          carrier: row.company ? String(row.company) : null,
+          trackingUrl: row.tracking_url ?? row.url ?? null,
+          shippedAt: row.shipped_at ?? data.shipped_at ?? data.completed_at ?? null,
+          source: "brandsgateway",
+          bg_vendor_id: row.vendor_id != null ? row.vendor_id : null,
+          lineItems: Array.isArray(row.line_items) ? row.line_items : undefined,
+        });
+      }
+      return tracking;
+    } catch (error) {
+      const status = error.response?.status;
+      console.warn(
+        `   ⚠️  [${this.vendorName}] getTracking(${vendorOrderId}) failed:`,
+        status || error.message
+      );
+      return [];
+    }
   }
 }
 

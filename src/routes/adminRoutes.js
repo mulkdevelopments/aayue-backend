@@ -16,7 +16,7 @@ const {
   fetchAllBdroppyProducts,
 } = require("../controllers/importController/bdroppy/bdroppyDistributionService");
 const { AdminServices } = require("../services/adminService");
-const { protectAdmin } = require("../middlewares/authMiddleware");
+const { protectAdmin, requireSuperadmin } = require("../middlewares/authMiddleware");
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
@@ -29,14 +29,18 @@ router.get("/ok", (req, res) => {
 });
 
 router.post(
-  "/send-admin-magic-link",
-  indexCtrl.adminAuthController.sendAdminMagicLink
+  "/send-admin-login-otp",
+  indexCtrl.adminAuthController.sendAdminLoginOtp
 );
 router.post(
-  "/admin-login-with-magic-link",
-  indexCtrl.adminAuthController.adminLoginWithMagicLink
+  "/admin-verify-login-otp",
+  indexCtrl.adminAuthController.adminVerifyLoginOtp
 );
 router.use(protectAdmin);
+
+/** ================== Admin role management (superadmin only) ================== */
+router.get("/admins", requireSuperadmin, indexCtrl.adminManagementController.listAdmins);
+router.patch("/admins/:id", requireSuperadmin, indexCtrl.adminManagementController.updateAdmin);
 
 /** ================== Import Products via CSV ================== */
 router.post(
@@ -109,6 +113,71 @@ router.put(
   indexCtrl.productManagementController.toggleProductStatus
 );
 
+router.put(
+  "/update-product",
+  indexCtrl.productManagementController.updateProduct
+);
+router.post(
+  "/generate-our-description",
+  indexCtrl.productManagementController.generateOurDescription
+);
+router.delete(
+  "/delete-product",
+  indexCtrl.productManagementController.softDeleteProduct
+);
+router.post(
+  "/bulk-product-action",
+  indexCtrl.productManagementController.bulkProductAction
+);
+router.get(
+  "/deleted-suspicious-products",
+  indexCtrl.productManagementController.getDeletedOrSuspiciousProducts
+);
+router.put(
+  "/recover-product",
+  indexCtrl.productManagementController.recoverProduct
+);
+router.post(
+  "/bulk-recover-products",
+  indexCtrl.productManagementController.bulkRecoverProducts
+);
+router.post(
+  "/quarantine-review-suggest",
+  indexCtrl.productManagementController.quarantineReviewSuggest
+);
+router.post(
+  "/quarantine-review-apply",
+  indexCtrl.productManagementController.quarantineReviewApply
+);
+router.get(
+  "/competitor-blacklist",
+  indexCtrl.productManagementController.getCompetitorBlacklist
+);
+router.post(
+  "/competitor-blacklist",
+  indexCtrl.productManagementController.addCompetitorBlacklist
+);
+router.delete(
+  "/competitor-blacklist/:id",
+  indexCtrl.productManagementController.deleteCompetitorBlacklist
+);
+router.get(
+  "/margin-settings",
+  indexCtrl.productManagementController.getMarginSettings
+);
+router.get(
+  "/margin-settings/list",
+  indexCtrl.productManagementController.listMarginSettings
+);
+router.put(
+  "/margin-settings",
+  indexCtrl.productManagementController.updateMarginSettings
+);
+router.post(
+  "/margin-settings/apply-now",
+  indexCtrl.productManagementController.applyMarginNow
+);
+
 router.patch(
   "/update-product-price-by-vendor-id",
   indexCtrl.productManagementController.updateProductPriceByVendorId
@@ -176,6 +245,24 @@ router.delete(
   indexCtrl.brandGroupController.deleteGroupBrand
 );
 
+/**================= Brand highlights (homepage tiles) ================ */
+router.get(
+  "/brand-highlights",
+  indexCtrl.brandHighlightController.listBrandHighlightsAdmin
+);
+router.post(
+  "/brand-highlights",
+  indexCtrl.brandHighlightController.createBrandHighlight
+);
+router.patch(
+  "/brand-highlights/:id",
+  indexCtrl.brandHighlightController.updateBrandHighlight
+);
+router.delete(
+  "/brand-highlights/:id",
+  indexCtrl.brandHighlightController.deleteBrandHighlight
+);
+
 /**================= New Arrival Routes ================ */
 router.post(
   "/add-new-arrival",
@@ -211,6 +298,18 @@ router.put(
   "/update-section",
   indexCtrl.adminSectionController.updateHomeSection
 );
+
+/**================= Custom Duties (per currency) ================== */
+router.get("/custom-duties", indexCtrl.productManagementController.getCustomDuties);
+router.put("/custom-duties", indexCtrl.productManagementController.updateCustomDuties);
+
+/**================= Hero Section (Slides) Routes ================== */
+router.get("/hero-slides", indexCtrl.heroSlideController.listHeroSlides);
+  router.post("/hero-slides", indexCtrl.heroSlideController.createHeroSlide);
+  router.put("/hero-slides/:id", indexCtrl.heroSlideController.updateHeroSlide);
+  router.delete("/hero-slides/:id", indexCtrl.heroSlideController.deleteHeroSlide);
+  router.get("/hero-slides/:id/products", indexCtrl.heroSlideController.getHeroSlideProducts);
+  router.put("/hero-slides/:id/products", indexCtrl.heroSlideController.setHeroSlideProducts);
 
 /**================= Sales Routes================== */
 
@@ -269,7 +368,7 @@ router.patch(
   "/update-vendor-status",
   indexCtrl.vendorController.updateVendorStatus
 );
-
+router.patch("/update-vendor", indexCtrl.vendorController.updateVendor);
 router.get("/get-vendor-by-id", indexCtrl.vendorController.getVendorById);
 router.get("/vendor-product-stats/:vendorId", indexCtrl.vendorController.getVendorProductStats);
 
@@ -351,7 +450,15 @@ router.post("/create-policies", indexCtrl.policyController.upsertPolicy);
 
 router.get("/get-home-banners", indexCtrl.bannerController.getHomeBanners);
 
+router.delete(
+  "/delete-home-banner",
+  indexCtrl.bannerController.deleteHomeBannerSlot
+);
+
 router.get("/get-policies", indexCtrl.policyController.getPolicy);
+
+/**================= Agents (monitor all agents) ================== */
+router.get("/agents", indexCtrl.agentsController.getAgents);
 
 /**================= Auto Map Jobs ================== */
 router.post(
@@ -371,6 +478,59 @@ router.post(
   indexCtrl.autoMapController.stopAutoMap
 );
 
+/**================= Category Remap (re-run AI map for a subtree) ================== */
+router.post(
+  "/category-remap/start",
+  indexCtrl.remapCategoryController.startCategoryRemap
+);
+router.get(
+  "/category-remap/status",
+  indexCtrl.remapCategoryController.getCategoryRemapStatus
+);
+router.get(
+  "/category-remap/active",
+  indexCtrl.remapCategoryController.getActiveCategoryRemapJob
+);
+router.post(
+  "/category-remap/stop",
+  indexCtrl.remapCategoryController.stopCategoryRemap
+);
+
+/**================= Description Rewrite (Agent) ================== */
+router.post(
+  "/description-rewrite/start",
+  indexCtrl.descriptionRewriteController.startDescriptionRewrite
+);
+router.get(
+  "/description-rewrite/status",
+  indexCtrl.descriptionRewriteController.getDescriptionRewriteStatus
+);
+router.get(
+  "/description-rewrite/active",
+  indexCtrl.descriptionRewriteController.getActiveDescriptionRewriteJob
+);
+router.post(
+  "/description-rewrite/stop",
+  indexCtrl.descriptionRewriteController.stopDescriptionRewrite
+);
+
+/**================= Product Name Rewrite (Agent) ================== */
+router.post(
+  "/product-name-rewrite/start",
+  indexCtrl.productNameRewriteController.startProductNameRewrite
+);
+router.get(
+  "/product-name-rewrite/status",
+  indexCtrl.productNameRewriteController.getProductNameRewriteStatus
+);
+router.get(
+  "/product-name-rewrite/active",
+  indexCtrl.productNameRewriteController.getActiveProductNameRewriteJob
+);
+router.post(
+  "/product-name-rewrite/stop",
+  indexCtrl.productNameRewriteController.stopProductNameRewrite
+);
 
 /**=================Contact us================= */
 router.get("/get-access-requests", protectAdmin, indexCtrl.accessRequestController.getAllAccessRequests);
@@ -408,6 +568,10 @@ router.get('/list-sale-by-categories', indexCtrl.adminSalesController.listSaleBy
 router.post('/save-about-us', indexCtrl.aboutUsController.saveAboutUs);
 router.get('/get-about-us', indexCtrl.aboutUsController.getAboutUs);
 
+/**=================== Page Content (FAQ, How to Shop) ================ */
+router.get('/get-page-content', indexCtrl.pageContentController.getPageContent);
+router.post('/save-page-content', indexCtrl.pageContentController.savePageContent);
+
 /**=================== Vendor Orders Routes ================  */
 
 const vendorOrderCtrl = require('../controllers/adminController/vendorOrderController');
@@ -416,11 +580,14 @@ const vendorOrderCtrl = require('../controllers/adminController/vendorOrderContr
 router.get('/vendor-orders/summary', vendorOrderCtrl.getVendorOrdersSummary);
 router.get('/vendor-orders/failed', vendorOrderCtrl.getFailedVendorOrders);
 router.get('/vendor-orders/pending', vendorOrderCtrl.getPendingVendorOrders);
+router.get('/tracking-timeline', vendorOrderCtrl.getCarrierTrackingTimeline);
 router.get('/vendor-orders/:orderId/details', vendorOrderCtrl.getOrderDetails);
 
 // Vendor order actions
 router.post('/vendor-orders/:orderId/retry', vendorOrderCtrl.retryVendorOrder);
 router.post('/vendor-orders/:orderId/sync-tracking', vendorOrderCtrl.syncOrderTracking);
+router.post('/vendor-orders/:orderId/mark-paid', vendorOrderCtrl.markVendorPaid);
+router.post('/vendor-orders/:orderId/unmark-paid', vendorOrderCtrl.unmarkVendorPaid);
 router.post('/vendor-orders/:orderId/place', vendorOrderCtrl.manualPlaceOrder);
 
 module.exports = router;

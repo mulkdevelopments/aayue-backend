@@ -194,10 +194,11 @@ const getAICategorySuggestions = async (product, categories) => {
       parsedMeta?.gender ||
       "";
 
+    const descSource = product.our_description || product.description;
     const productInfo = {
       name: product.name || "",
       title: product.title || "",
-      description: product.description ? product.description.replace(/<[^>]*>/g, "").substring(0, 800) : "",
+      description: descSource ? descSource.replace(/<[^>]*>/g, "").substring(0, 800) : "",
       brand: product.brand_name || "",
       vendorCategory: product.vendor_category_name || product.categories?.[0]?.name || "",
       vendorCategoryPath: product.vendor_category_path || product.categories?.[0]?.path || "",
@@ -228,7 +229,7 @@ Description: ${productInfo.description || "No description available"}
 
 ===== CRITICAL: IDENTIFY THE PRODUCT TYPE =====
 PRIORITY ORDER: TITLE FIRST, THEN DESCRIPTION,  THEN VENDOR CATEGORY 
-Note: Vendor categories can be broad. If the name/description indicates a more specific sub‑category that exists (e.g., "T‑shirt" under Topwear), choose the more specific leaf.
+Note: Vendor categories can be broad. If the name/description indicates a more specific sub‑category that exists (e.g., "T‑shirt" under Topwear, "mini dress" under Dresses), you MUST prefer that leaf.
 
 The product name is: "${productInfo.name}"
 The vendor category is: "${productInfo.vendorCategory}"
@@ -238,13 +239,14 @@ Based on these, what type of product is this?
 
 ===== AVAILABLE CATEGORIES (FULL PATHS, LEAF AND NON-LEAF) =====
 ${categoryListStr}
-
-===== YOUR TASK =====
-1. First, identify the product type from the PRODUCT NAME, DESCRIPTION and VENDOR CATEGORY above
-2. Then find matching categories from the available list that match this product type
+1. Identify the product type from the PRODUCT NAME, DESCRIPTION and VENDOR CATEGORY above
+2. Find matching categories from the available list that match this product type
 3. Return 3 suggestions - all must be for the SAME product type
 
-If you are not confident about a specific leaf category, you may suggest a parent category instead.
+RANKING (critical): Put the most specific category that truly fits the product as suggestion #1 with the HIGHEST confidence.
+- Example: product clearly a "mini dress" → #1 must be the Mini Dresses leaf (if listed), NOT the generic Dresses parent.
+- Use a parent (e.g. Dresses) as #1 only when no listed leaf matches the product type.
+- #2 and #3 can be sibling leaves or the parent as fallback.
 You MUST choose only from the category list above. Do not invent or assume categories that are not listed.
 
 EXAMPLES:
@@ -258,27 +260,30 @@ STRICT RULES:
 - A product named "Necklace" should ONLY get Jewelry suggestions, NEVER clothing
 - Use the exact category IDs from the list above
 
-Return exactly 3 suggestions as JSON array:
+Return exactly 3 suggestions as JSON array (highest confidence on the best-fitting leaf when one exists):
 [
   {
     "category_id": "exact-uuid-from-list",
-    "category_path": "Root > Parent > Child > Leaf (full path)",
+    "category_path": "Root > Parent > Child > Most specific leaf (e.g. Mini Dresses)",
     "confidence": 95,
-    "reason": "Why this specific path matches"
+    "reason": "Title/description clearly indicate this leaf; not the broader parent only"
   },
   {
     "category_id": "exact-uuid-from-list",
-    "category_path": "Alternative full path",
+    "category_path": "Alternative leaf or sibling",
     "confidence": 75,
     "reason": "Why this is a good alternative"
   },
   {
     "category_id": "exact-uuid-from-list",
-    "category_path": "Another full path option",
+    "category_path": "Parent or other fallback only if needed",
     "confidence": 60,
     "reason": "Third option explanation"
   }
 ]
+
+If NO category in the list fits this product (e.g. product type not in our taxonomy, or no suitable option for this gender), respond with this JSON object instead of an array:
+{"no_match": true, "reason": "Brief, clear explanation why no category fits (e.g. product type, missing category, or mismatch)."}
 
 Return ONLY valid JSON, no other text.`;
 
@@ -365,11 +370,13 @@ CRITICAL RULE: The product name, description and vendor category tell you EXACTL
 - "Jeans" in the name = it's jeans, suggest jeans/pants categories
 - "Necklace" in the name = it's jewelry, suggest necklace categories
 - "Sneakers" in the name = it's shoes, suggest sneaker categories
+- "Mini dress" / "maxi" / "midi" in the name or description = pick the matching leaf (Mini/Maxi/Midi Dresses), not only the parent Dresses
 
 NEVER suggest jewelry categories for clothing products.
 NEVER suggest clothing categories for jewelry products.
 
-Respond with valid JSON only.`,
+If no category in the provided list fits the product (e.g. product type not in taxonomy, no option for this gender), respond with {"no_match": true, "reason": "Clear explanation why no category fits"}.
+Otherwise respond with the JSON array of 3 suggestions. Respond with valid JSON only.`,
         },
         {
           role: "user",
@@ -384,7 +391,7 @@ Respond with valid JSON only.`,
     console.log("AI Suggestion Raw Response:", content);
 
     // Parse the JSON response
-    let suggestions;
+    let parsed;
     try {
       // Clean the response - remove markdown code blocks if present
       let cleanContent = content.trim();
@@ -399,11 +406,23 @@ Respond with valid JSON only.`,
       }
       cleanContent = cleanContent.trim();
 
-      suggestions = JSON.parse(cleanContent);
+      parsed = JSON.parse(cleanContent);
     } catch (parseErr) {
       console.error("Failed to parse AI response:", content);
       throw new Error("Failed to parse AI suggestions");
     }
+
+    // If model flagged name/description mismatch, return special object
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.suspicious === true) {
+      return { suspicious: true, reason: parsed.reason || "Name and description describe different product types" };
+    }
+
+    // If model found no matching category, return reason (like description agent)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.no_match === true) {
+      return { no_match: true, reason: parsed.reason || "No matching category in our taxonomy." };
+    }
+
+    const suggestions = Array.isArray(parsed) ? parsed : [];
 
     // Validate and enrich suggestions with category names
     const validatedSuggestions = suggestions

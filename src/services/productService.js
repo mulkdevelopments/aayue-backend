@@ -1,6 +1,10 @@
 // services/productService.js
 const { randomUUID } = require("crypto");
 const { Client } = require("@elastic/elasticsearch");
+const {
+  normalizeColorFilterParams,
+  sqlVariantMatchesColorParams,
+} = require("../utils/colorFilterSql");
 
 
 function toJsonb(value) {
@@ -18,6 +22,20 @@ function toJsonb(value) {
   } catch (e) {
     return JSON.stringify(String(value));
   }
+}
+
+// Match DB brand_name_normalized: "Dolce & Gabbana" -> "dolce gabbana"
+function normalizeBrandNames(items = []) {
+  return items
+    .map((b) =>
+      String(b)
+        .trim()
+        .replace(/[^a-zA-Z0-9]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase()
+    )
+    .filter(Boolean);
 }
 
 const esClient = new Client({
@@ -293,7 +311,7 @@ const ProductService = {
     } = options;
 
     // ---------- Build base WHERE clauses (only referencing products and EXISTS subqueries) ----------
-    const whereClauses = ["p.deleted_at IS NULL"];
+    const whereClauses = ["p.deleted_at IS NULL", "p.is_active = TRUE"];
     // ✅ Filter out products from inactive vendors
     whereClauses.push(`(p.vendor_id IS NULL OR EXISTS (SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL))`);
     const params = [];
@@ -372,13 +390,14 @@ const ProductService = {
     }
 
     if (color) {
-      params.push(color);
-      // whereClauses.push(`EXISTS (SELECT 1 FROM product_variants pv_c WHERE pv_c.product_id = p.id AND (pv_c.variant_color = $${idx} OR (pv_c.attributes->>'color') = $${idx}) AND pv_c.deleted_at IS NULL)`);
-      // idx++;
-      whereClauses.push(
-        `EXISTS (SELECT 1 FROM product_variants pv_c WHERE pv_c.product_id = p.id AND (pv_c.normalized_color = $${idx} OR (pv_c.attributes->>'color') = $${idx}) AND pv_c.deleted_at IS NULL)`
-      );
-      idx++;
+      const colorArr = normalizeColorFilterParams([color]);
+      if (colorArr.length > 0) {
+        params.push(colorArr);
+        whereClauses.push(
+          `EXISTS (SELECT 1 FROM product_variants pv_c WHERE pv_c.product_id = p.id AND pv_c.deleted_at IS NULL AND ${sqlVariantMatchesColorParams("pv_c", idx)})`
+        );
+        idx++;
+      }
     }
     if (size) {
       params.push(size);
@@ -455,11 +474,10 @@ const ProductService = {
       AND p.is_active = false
     `;
 
-    const [countRes, mappedRes, inactiveRes] = await Promise.all([
-      client.query(countSQL, params),
-      client.query(mappedCountSQL, params),
-      client.query(inactiveCountSQL, params),
-    ]);
+    // Run count queries sequentially to avoid pg deprecation (same client cannot run concurrent queries)
+    const countRes = await client.query(countSQL, params);
+    const mappedRes = await client.query(mappedCountSQL, params);
+    const inactiveRes = await client.query(inactiveCountSQL, params);
 
     const total = parseInt(countRes.rows[0].total, 10) || 0;
     const mappedTotal = parseInt(mappedRes.rows[0].total, 10) || 0;
@@ -638,6 +656,43 @@ const ProductService = {
     return { total, mappedTotal, inactiveTotal, products };
   },
 
+  /**
+   * Lightweight product search for admin pickers (e.g. hero slide products).
+   * Only text search on name/product_sku, no filters/counts/aggregates. Much faster than getProducts.
+   */
+  async getProductsSearchLight(options, client) {
+    const { q, limit = 20, offset = 0 } = options;
+    if (!q || !String(q).trim()) {
+      return { total: 0, mappedTotal: 0, inactiveTotal: 0, products: [] };
+    }
+    const pattern = `%${String(q).trim()}%`;
+    const where =
+      "p.deleted_at IS NULL AND (p.vendor_id IS NULL OR EXISTS (SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL)) AND (p.name ILIKE $1 OR p.product_sku ILIKE $1)";
+    const countRes = await client.query(
+      `SELECT COUNT(*)::int AS total FROM products p WHERE ${where}`,
+      [pattern]
+    );
+    const total = parseInt(countRes.rows[0].total, 10) || 0;
+    if (total === 0) return { total: 0, mappedTotal: 0, inactiveTotal: 0, products: [] };
+    const { rows } = await client.query(
+      `SELECT p.id, p.name, p.title, p.product_sku, p.product_img
+       FROM products p
+       WHERE ${where}
+       ORDER BY p.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [pattern, limit, offset]
+    );
+    const products = rows.map((r) => ({
+      id: r.id,
+      product_id: r.id,
+      name: r.name,
+      title: r.title,
+      product_sku: r.product_sku,
+      product_img: r.product_img,
+    }));
+    return { total, mappedTotal: 0, inactiveTotal: 0, products };
+  },
+
   //Impleted Elastic Search
   /*  async getProductsFromOurCategory(options, client) {
      const {
@@ -802,16 +857,16 @@ const ProductService = {
      }
  
      // ✅ Other filters (same as before)
- 
+
     if (brands.length > 0) {
-      const normalizedBrands = brands
-        .map((b) => String(b).trim().replace(/\s+/g, " ").toLowerCase())
-        .filter(Boolean);
+      const normalizedBrands = normalizeBrandNames(brands);
       params.push(normalizedBrands);
-      whereClauses.push(`p.brand_name_normalized = ANY($${idx}::text[])`);
+      whereClauses.push(
+        `TRIM(REGEXP_REPLACE(COALESCE(p.brand_name_normalized, ''), '\\s+', ' ', 'g')) = ANY($${idx}::text[])`
+      );
       idx++;
     }
- 
+
      if (vendor_id) {
        params.push(vendor_id);
        whereClauses.push(`p.vendor_id = $${idx}`);
@@ -993,6 +1048,7 @@ const ProductService = {
     const {
       q,
       category_id,
+      curated_slug,
       vendor_id,
       brands = [],
       colors = [],
@@ -1022,11 +1078,35 @@ const ProductService = {
     const params = [];
     let idx = 1;
 
+    // ✅ Curated collection (hero slide hand-picked products): restrict to product IDs from hero_slide_products
+    let curatedProductIds = null;
+    if (curated_slug) {
+      const slideRes = await client.query(
+        `SELECT id FROM hero_slides WHERE collection_slug = $1 AND deleted_at IS NULL AND is_active = true LIMIT 1`,
+        [curated_slug]
+      );
+      if (slideRes.rows.length === 0) {
+        return { total: 0, products: [] };
+      }
+      const heroSlideId = slideRes.rows[0].id;
+      const idsRes = await client.query(
+        `SELECT product_id FROM hero_slide_products WHERE hero_slide_id = $1 ORDER BY sort_order ASC, product_id ASC`,
+        [heroSlideId]
+      );
+      curatedProductIds = idsRes.rows.map((r) => r.product_id).filter(Boolean);
+      if (curatedProductIds.length === 0) {
+        return { total: 0, products: [] };
+      }
+      params.push(curatedProductIds);
+      whereClauses.push(`p.id = ANY($${idx}::uuid[])`);
+      idx++;
+    }
+
     let ourCatIds = [];
     let ourCategoryProductsExist = false;
 
-    // ✅ Category recursive lookup
-    if (category_id) {
+    // ✅ Category recursive lookup (skip when curated_slug is set)
+    if (!curated_slug && category_id) {
       const ourCatsRes = await client.query(
         `
         WITH RECURSIVE our_subtree AS (
@@ -1068,37 +1148,56 @@ const ProductService = {
       return { total: 0, products: [] };
     }
 
-    // ✅ Text search
+    // ✅ Text search (tokenized, AND across terms)
     if (q) {
-      const qPattern = `%${q}%`;
-      params.push(qPattern, qPattern, qPattern, qPattern, qPattern, qPattern);
-      whereClauses.push(`(
-        p.name ILIKE $${idx} OR
-        p.title ILIKE $${idx + 1} OR
-        p.description ILIKE $${idx + 2} OR
-        p.brand_name_normalized ILIKE $${idx + 3} OR
-        EXISTS (
-            SELECT 1 FROM product_variants pv_s
-            WHERE pv_s.product_id = p.id AND pv_s.sku ILIKE $${idx + 4}
-        ) OR
-        EXISTS (
-            SELECT 1 FROM product_our_category_map pom_s
-            JOIN categories c_s ON c_s.id = pom_s.our_category_id
-            WHERE pom_s.product_id = p.id
-              AND c_s.deleted_at IS NULL
-              AND c_s.name ILIKE $${idx + 5}
-        )
-      )`);
-      idx += 6;
+      const tokens = String(q)
+        .trim()
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .slice(0, 5);
+      if (tokens.length > 0) {
+        const tokenClauses = [];
+        for (const token of tokens) {
+          const qPattern = `%${token}%`;
+          params.push(
+            qPattern,
+            qPattern,
+            qPattern,
+            qPattern,
+            qPattern,
+            qPattern
+          );
+          tokenClauses.push(`(
+            p.name ILIKE $${idx} OR
+            p.title ILIKE $${idx + 1} OR
+            p.short_description ILIKE $${idx + 2} OR
+            p.brand_name_normalized ILIKE $${idx + 3} OR
+            EXISTS (
+              SELECT 1 FROM product_variants pv_s
+              WHERE pv_s.product_id = p.id AND pv_s.sku ILIKE $${idx + 4}
+            ) OR
+            EXISTS (
+              SELECT 1 FROM product_our_category_map pom_s
+              JOIN categories c_s ON c_s.id = pom_s.our_category_id
+              WHERE pom_s.product_id = p.id
+                AND c_s.deleted_at IS NULL
+                AND c_s.name ILIKE $${idx + 5}
+            )
+          )`);
+          idx += 6;
+        }
+        whereClauses.push(tokenClauses.join(" AND "));
+      }
     }
 
     // ✅ Other filters
     if (brands.length > 0) {
-      const normalizedBrands = brands
-        .map((b) => String(b).trim().replace(/\s+/g, " ").toLowerCase())
-        .filter(Boolean);
+      const normalizedBrands = normalizeBrandNames(brands);
       params.push(normalizedBrands);
-      whereClauses.push(`p.brand_name_normalized = ANY($${idx}::text[])`);
+      whereClauses.push(
+        `TRIM(REGEXP_REPLACE(COALESCE(p.brand_name_normalized, ''), '\\s+', ' ', 'g')) = ANY($${idx}::text[])`
+      );
       idx++;
     }
 
@@ -1151,15 +1250,19 @@ const ProductService = {
     }
 
     if (colors.length > 0) {
-      params.push(colors);
-      whereClauses.push(`
+      const colorParams = normalizeColorFilterParams(colors);
+      if (colorParams.length > 0) {
+        params.push(colorParams);
+        whereClauses.push(`
         EXISTS (
             SELECT 1 FROM product_variants pv
             WHERE pv.product_id = p.id
-              AND (pv.normalized_color = ANY($${idx}::text[]) OR pv.attributes->>'color' = ANY($${idx}::text[]))
+              AND pv.deleted_at IS NULL
+              AND ${sqlVariantMatchesColorParams("pv", idx)}
         )
       `);
-      idx++;
+        idx++;
+      }
     }
 
     if (sizes.length > 0) {
@@ -1201,14 +1304,26 @@ const ProductService = {
 
     const countSQL = `SELECT COUNT(*)::int AS total FROM products p ${whereSQL}`;
     const countRes = await client.query(countSQL, params);
-    const total = parseInt(countRes.rows[0].total, 10);
+    let total = parseInt(countRes.rows[0].total, 10);
 
     if (total === 0) return { total: 0, products: [] };
 
-    let idsSQL;
-    if (sort_by === "price_low_to_high" || sort_by === "price_high_to_low") {
-      const priceOrder = sort_by === "price_low_to_high" ? "ASC" : "DESC";
-      idsSQL = `
+    let idsRes;
+    if (curated_slug) {
+      total = curatedProductIds.length;
+      if (offset >= total) return { total, products: [] };
+      const pageIds = curatedProductIds.slice(offset, offset + limit);
+      const paramsPage = [...params.slice(0, idx - 1), pageIds, ...params.slice(idx)];
+      const curatedIdsSQL = `
+        SELECT p.id FROM products p ${whereSQL}
+        ORDER BY array_position($${idx}::uuid[], p.id)
+      `;
+      idsRes = await client.query(curatedIdsSQL, paramsPage);
+    } else {
+      let idsSQL;
+      if (sort_by === "price_low_to_high" || sort_by === "price_high_to_low") {
+        const priceOrder = sort_by === "price_low_to_high" ? "ASC" : "DESC";
+        idsSQL = `
         SELECT p.id,
                MIN(pv.price) AS min_price,
                MAX(pv.price) AS max_price
@@ -1219,18 +1334,19 @@ const ProductService = {
         ORDER BY ${priceOrder === "ASC" ? "min_price ASC" : "max_price DESC"}
         LIMIT $${idx} OFFSET $${idx + 1}
       `;
-    } else {
-      idsSQL = `
+      } else {
+        idsSQL = `
         SELECT p.id
         FROM products p
         ${whereSQL}
-        ORDER BY p.${sort_by} ${sort_order}
+        ORDER BY p.${sort_by} ${sort_order} NULLS LAST, p.created_at DESC
         LIMIT $${idx} OFFSET $${idx + 1}
       `;
+      }
+      params.push(limit, offset);
+      idsRes = await client.query(idsSQL, params);
     }
 
-    params.push(limit, offset);
-    const idsRes = await client.query(idsSQL, params);
     const ids = idsRes.rows.map((r) => r.id);
 
     if (ids.length === 0) return { total: 0, products: [] };
@@ -1417,6 +1533,7 @@ const ProductService = {
       p.title,
       p.short_description,
       p.description,
+      p.our_description,
       p.brand_name,
       p.gender,
       p.default_category_id,
@@ -1492,7 +1609,7 @@ const ProductService = {
     WHERE p.deleted_at IS NULL AND p.is_active = TRUE AND p.id = $1
 
     GROUP BY
-      p.id,p.vendor_id,p.productid,p.product_sku,p.name,p.title,p.short_description,p.description,
+      p.id,p.vendor_id,p.productid,p.product_sku,p.name,p.title,p.short_description,p.description,p.our_description,
       p.brand_name,p.gender,p.default_category_id,p.attributes,p.product_meta,p.sizechart_text,
       p.sizechart_image,p.shipping_returns_payments,p.environmental_impact,p.product_img,
       p.product_img1,p.product_img2,p.product_img3,p.product_img4,p.product_img5,p.videos,
@@ -1529,6 +1646,7 @@ const ProductService = {
       title: p.title,
       short_description: p.short_description,
       description: p.description,
+      our_description: p.our_description || null,
       brand_name: p.brand_name,
       gender: p.gender,
       default_category_id: p.default_category_id,
@@ -1698,7 +1816,12 @@ const ProductService = {
         };
     }, */
 
-  async getProductByIdAdmin(productId, client) {
+  async getProductByIdAdmin(productId, client, options = {}) {
+    const includeDeleted = !!options.includeDeleted;
+    const whereClause = includeDeleted ? "p.id = $1" : "p.deleted_at IS NULL AND p.id = $1";
+    const variantJoin = includeDeleted
+      ? "LEFT JOIN product_variants pv ON pv.product_id = p.id"
+      : "LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL";
     // ✅ Base Product Query (same as before)
     const sqlProduct = `
     SELECT
@@ -1731,10 +1854,15 @@ const ProductService = {
       p.supplier,
       p.country_of_origin,
       p.is_active,
+      p.manually_edited_at,
       p.created_at,
       p.updated_at,
       p.is_our_picks,
       p.is_newest,
+      p.deleted_at,
+      p.suspicious_at,
+      p.suspicious_reason,
+      p.our_description,
       v.name AS vendor_name,
       v.capabilities AS vendor_capabilities,
       MIN(pv.price) AS min_price,
@@ -1773,18 +1901,18 @@ const ProductService = {
 
     FROM products p
     LEFT JOIN vendors v ON v.id = p.vendor_id AND v.deleted_at IS NULL
-    LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+    ${variantJoin}
     LEFT JOIN product_categories pc ON pc.product_id = p.id AND pc.deleted_at IS NULL
     LEFT JOIN categories c ON c.id = pc.category_id AND c.deleted_at IS NULL
     LEFT JOIN product_dynamic_filters pdf ON pdf.product_id = p.id AND pdf.deleted_at IS NULL
-    WHERE p.deleted_at IS NULL AND p.id = $1
+    WHERE ${whereClause}
     GROUP BY
-      p.id,p.vendor_id,p.productid,p.product_sku,p.name,p.title,p.short_description,p.description,
+      p.id,p.vendor_id,p.productid,p.product_sku,p.name,p.title,p.short_description,p.description,p.our_description,
       p.brand_name,p.gender,p.default_category_id,p.attributes,p.product_meta,p.sizechart_text,
       p.sizechart_image,p.shipping_returns_payments,p.environmental_impact,p.product_img,
       p.product_img1,p.product_img2,p.product_img3,p.product_img4,p.product_img5,p.videos,
-      p.delivery_time,p.cod_available,p.supplier,p.country_of_origin,p.is_active,p.created_at,
-      p.updated_at,p.is_our_picks,p.is_newest,v.name,v.capabilities
+      p.delivery_time,p.cod_available,p.supplier,p.country_of_origin,p.is_active,p.manually_edited_at,p.created_at,
+      p.updated_at,p.is_our_picks,p.is_newest,p.deleted_at,p.suspicious_at,p.suspicious_reason,v.name,v.capabilities
   `;
 
     const productResult = await client.query(sqlProduct, [productId]);
@@ -1854,11 +1982,13 @@ const ProductService = {
       title: p.title,
       short_description: p.short_description,
       description: p.description,
+      our_description: p.our_description || null,
       brand_name: p.brand_name,
       gender: p.gender,
       default_category_id: p.default_category_id,
       country_of_origin: p.country_of_origin,
       is_active: p.is_active,
+      manually_edited_at: p.manually_edited_at,
       created_at: p.created_at,
       updated_at: p.updated_at,
       product_img: p.product_img,
@@ -1869,6 +1999,9 @@ const ProductService = {
       product_img5: p.product_img5,
       is_our_picks: p.is_our_picks,
       is_newest: p.is_newest,
+      deleted_at: p.deleted_at ?? null,
+      suspicious_at: p.suspicious_at ?? null,
+      suspicious_reason: p.suspicious_reason ?? null,
       min_price: p.min_price ? Number(p.min_price) : null,
       max_price: p.max_price ? Number(p.max_price) : null,
       variants,
@@ -1878,6 +2011,239 @@ const ProductService = {
       mapped_categories: mappedCategories, // ✅ all mapped categories with parent hierarchy
     };
   },
+
+  async updateProductAdmin(productId, payload, client) {
+    const { product: productFields = {}, variants: variantUpdates = [] } = payload;
+    if (!productId) throw new AppError("productId is required", 400);
+
+    const check = await client.query(
+      "SELECT id FROM products WHERE id = $1 AND deleted_at IS NULL",
+      [productId]
+    );
+    if (check.rowCount === 0) throw new AppError("Product not found or deleted", 404);
+
+    const toJsonb = (v) => (v === undefined || v === null ? null : (typeof v === "string" ? v : JSON.stringify(v)));
+
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    const allowed = [
+      "name", "title", "short_description", "description", "our_description", "brand_name", "gender", "default_category_id",
+      "attributes", "product_meta", "product_img", "product_img1", "product_img2", "product_img3", "product_img4", "product_img5",
+      "country_of_origin", "is_active", "sizechart_text", "sizechart_image"
+    ];
+    for (const key of allowed) {
+      if (productFields[key] !== undefined) {
+        if (["attributes", "product_meta"].includes(key)) {
+          updates.push(`${key} = $${paramIndex}::jsonb`);
+          values.push(toJsonb(productFields[key]));
+        } else {
+          updates.push(`${key} = $${paramIndex}`);
+          values.push(productFields[key]);
+        }
+        paramIndex++;
+      }
+    }
+    updates.push("manually_edited_at = NOW()");
+    updates.push("updated_at = NOW()");
+    values.push(productId);
+    const updateSql = `UPDATE products SET ${updates.join(", ")} WHERE id = $${paramIndex} AND deleted_at IS NULL`;
+    await client.query(updateSql, values);
+
+    for (const v of variantUpdates) {
+      if (!v.id) continue;
+      const vUpdates = [];
+      const vValues = [];
+      let vi = 1;
+      const vAllowed = ["price", "mrp", "stock", "variant_color", "variant_size", "attributes"];
+      for (const k of vAllowed) {
+        if (v[k] !== undefined) {
+          if (k === "attributes") {
+            vUpdates.push(`${k} = $${vi}::jsonb`);
+            vValues.push(toJsonb(v[k]));
+          } else {
+            vUpdates.push(`${k} = $${vi}`);
+            vValues.push(v[k]);
+          }
+          vi++;
+        }
+      }
+      if (vUpdates.length === 0) continue;
+      vUpdates.push("updated_at = NOW()");
+      vValues.push(v.id, productId);
+      await client.query(
+        `UPDATE product_variants SET ${vUpdates.join(", ")} WHERE id = $${vi} AND product_id = $${vi + 1} AND deleted_at IS NULL`,
+        vValues
+      );
+    }
+
+    return { id: productId, manually_edited_at: new Date().toISOString() };
+  },
+
+  /**
+   * Update product fields even when soft-deleted / quarantined (WHERE id only).
+   * Requires suspicious_at set — only for quarantine review workflow.
+   */
+  async updateProductAdminForQuarantine(productId, payload, client) {
+    const { product: productFields = {} } = payload || {};
+    if (!productId) throw new AppError("productId is required", 400);
+
+    const check = await client.query(
+      "SELECT id, suspicious_at FROM products WHERE id = $1",
+      [productId]
+    );
+    if (check.rowCount === 0) throw new AppError("Product not found", 404);
+    if (!check.rows[0].suspicious_at) {
+      throw new AppError(
+        "Product is not quarantined (no suspicious flag). Use standard product update.",
+        400
+      );
+    }
+
+    const toJsonb = (v) =>
+      v === undefined || v === null
+        ? null
+        : typeof v === "string"
+          ? v
+          : JSON.stringify(v);
+
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    const allowed = [
+      "name",
+      "title",
+      "short_description",
+      "description",
+      "our_description",
+      "brand_name",
+      "gender",
+      "default_category_id",
+      "attributes",
+      "product_meta",
+      "product_img",
+      "product_img1",
+      "product_img2",
+      "product_img3",
+      "product_img4",
+      "product_img5",
+      "country_of_origin",
+      "sizechart_text",
+      "sizechart_image",
+    ];
+    for (const key of allowed) {
+      if (productFields[key] !== undefined) {
+        if (["attributes", "product_meta"].includes(key)) {
+          updates.push(`${key} = $${paramIndex}::jsonb`);
+          values.push(toJsonb(productFields[key]));
+        } else {
+          updates.push(`${key} = $${paramIndex}`);
+          values.push(productFields[key]);
+        }
+        paramIndex++;
+      }
+    }
+
+    if (updates.length === 0) {
+      throw new AppError("No allowed fields to update", 400);
+    }
+
+    updates.push("manually_edited_at = NOW()");
+    updates.push("updated_at = NOW()");
+    values.push(productId);
+    const updateSql = `UPDATE products SET ${updates.join(", ")} WHERE id = $${paramIndex}`;
+    await client.query(updateSql, values);
+
+    return { id: productId, manually_edited_at: new Date().toISOString() };
+  },
+
+  async softDeleteProduct(productId, client) {
+    if (!productId) throw new AppError("productId is required", 400);
+    const check = await client.query(
+      "SELECT id FROM products WHERE id = $1 AND deleted_at IS NULL",
+      [productId]
+    );
+    if (check.rowCount === 0) throw new AppError("Product not found or already deleted", 404);
+    await client.query(
+      "UPDATE product_variants SET deleted_at = NOW(), updated_at = NOW() WHERE product_id = $1 AND deleted_at IS NULL",
+      [productId]
+    );
+    await client.query(
+      "UPDATE products SET deleted_at = NOW(), is_active = false, updated_at = NOW() WHERE id = $1",
+      [productId]
+    );
+    return { id: productId, deleted_at: new Date().toISOString() };
+  },
+
+  async markProductSuspicious(productId, reason, client) {
+    if (!productId) return;
+    await client.query(
+      "UPDATE product_variants SET deleted_at = NOW(), updated_at = NOW() WHERE product_id = $1 AND deleted_at IS NULL",
+      [productId]
+    );
+    await client.query(
+      `UPDATE products SET suspicious_at = NOW(), suspicious_reason = $1, deleted_at = NOW(), is_active = false, updated_at = NOW() WHERE id = $2`,
+      [reason || "competitor_name_in_description", productId]
+    );
+  },
+
+  async recoverProduct(productId, client) {
+    if (!productId) throw new AppError("product_id is required", 400);
+    const check = await client.query(
+      "SELECT id FROM products WHERE id = $1",
+      [productId]
+    );
+    if (check.rowCount === 0) throw new AppError("Product not found", 404);
+    await client.query(
+      "UPDATE product_variants SET deleted_at = NULL, updated_at = NOW() WHERE product_id = $1",
+      [productId]
+    );
+    await client.query(
+      `UPDATE products SET suspicious_at = NULL, suspicious_reason = NULL, deleted_at = NULL, is_active = true, updated_at = NOW() WHERE id = $1`,
+      [productId]
+    );
+    return { id: productId, recovered: true };
+  },
+
+  async updateOurDescription(productId, ourDescription, client) {
+    if (!productId) throw new AppError("productId is required", 400);
+    const res = await client.query(
+      "UPDATE products SET our_description = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL RETURNING id",
+      [ourDescription || null, productId]
+    );
+    if (res.rowCount === 0) throw new AppError("Product not found or deleted", 404);
+    return { id: productId, our_description: ourDescription || null };
+  },
+
+  async getDeletedOrSuspiciousProducts(options, client) {
+    const { page = 1, limit = 20, filter = "all" } = options || {};
+    const offset = (Math.max(1, page) - 1) * Math.min(100, Math.max(1, limit));
+    const limitVal = Math.min(100, Math.max(1, limit));
+
+    let whereClause = "WHERE (p.deleted_at IS NOT NULL OR p.suspicious_at IS NOT NULL)";
+    if (filter === "deleted") whereClause = "WHERE p.deleted_at IS NOT NULL";
+    if (filter === "suspicious") whereClause = "WHERE p.suspicious_at IS NOT NULL";
+
+    const countRes = await client.query(
+      `SELECT COUNT(*)::int AS total FROM products p ${whereClause}`
+    );
+    const total = countRes.rows[0]?.total ?? 0;
+
+    const q = `
+      SELECT p.id, p.name, p.title, p.brand_name, p.product_sku, p.vendor_id, p.deleted_at, p.suspicious_at, p.suspicious_reason, p.is_active, p.product_img,
+             v.name AS vendor_name
+      FROM products p
+      LEFT JOIN vendors v ON v.id = p.vendor_id
+      ${whereClause}
+      ORDER BY COALESCE(p.suspicious_at, p.deleted_at) DESC
+      LIMIT $1 OFFSET $2
+    `;
+    const { rows } = await client.query(q, [limitVal, offset]);
+    return { total, products: rows };
+  },
+
   async updateProductPrice(productId, type, varient_id, priceValue, client) {
     const validTypes = {
       mrp: "mrp",

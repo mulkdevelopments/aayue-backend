@@ -2,6 +2,13 @@
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 console.log("Stripe initialized with key:", process.env.STRIPE_SECRET_KEY);
+
+// Currencies Stripe can charge in (presentment). Depends on your Stripe account country.
+// PKR is not supported. If any currency fails at checkout, add it here and use a fallback below.
+const STRIPE_SUPPORTED_CURRENCIES = new Set(
+  ["aed", "sar", "qar", "kwd", "omr", "bhd", "inr"]
+);
+const STRIPE_FALLBACK_CURRENCY = "aed"; // Charge in AED if user currency not supported
 const dbPool = require("../../db/dbConnection");
 const CartService = require("../../services/cartService"); // assume you have getCart, addItem, clearCart
 const OrderService = require("../../services/orderService");
@@ -21,6 +28,7 @@ const fs = require("fs");
 const { generateInvoicePDF } = require("../../utils/generateInvociePdf");
 
 const { emailQueue, pdfQueue } = require("../../lib/queue");
+const { getCustomDutyForCurrency } = require("../../utils/customDutyHelper");
 // const sendInvoiceAttachmentEmail = require("../../utils/sendMail");
 const { VendorOrderManager } = require("../../services/vendorOrders");
 
@@ -206,22 +214,34 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
       shipping_address_id,
       couponId,
       couponCode,
-      selectedCurrency = "EUR",
+      selectedCurrency = "AED",
       exchangeRate = 1,
-      currencySymbol = "€",
+      currencySymbol = "AED",
     } = req.body;
 
-    // PKR is not supported by Stripe - fallback to EUR for payment processing
-    // User still sees PKR prices on frontend, but payment is processed in EUR
+    // Store what the user sees (display currency)
     const displayCurrency = selectedCurrency;
     const displayCurrencySymbol = currencySymbol;
     const displayExchangeRate = exchangeRate;
 
-    if (selectedCurrency === "PKR") {
-      console.log("⚠️ PKR currency detected - processing payment in EUR");
-      selectedCurrency = "EUR";
-      exchangeRate = 1;
-      currencySymbol = "€";
+    // Stripe does not support all currencies. Use a supported one for the actual charge.
+    const currencyLower = String(selectedCurrency || "").toLowerCase();
+    if (!STRIPE_SUPPORTED_CURRENCIES.has(currencyLower)) {
+      const fallback = STRIPE_FALLBACK_CURRENCY;
+      console.log(
+        `⚠️ Currency ${selectedCurrency} not supported by Stripe - processing payment in ${fallback.toUpperCase()}`
+      );
+      selectedCurrency = fallback.toUpperCase();
+      currencySymbol = fallback.toUpperCase();
+      // Charge amount in fallback currency: need EUR→fallback rate (from DB for AED).
+      if (fallback === "aed") {
+        const { rows: rateRows } = await client.query(
+          `SELECT rate FROM currency_exchange_rates WHERE from_currency = 'EUR' AND to_currency = 'AED' LIMIT 1`
+        );
+        exchangeRate = rateRows[0] ? Number(rateRows[0].rate) : 4.27;
+      } else {
+        exchangeRate = 1;
+      }
     }
 
     if (!shipping_address_id) {
@@ -350,15 +370,21 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
       client
     );
 
-    // Build Stripe line_items with currency conversion
-    // Note: Prices in DB are in EUR, we convert to selected currency
-    const centsDiscount = Math.round(discountToApply * exchangeRate * 100);
+    // Duty-inclusive amounts so Stripe matches cart (same as frontend format())
+    const dutyPercent = await getCustomDutyForCurrency(client, selectedCurrency);
+    const dutyMultiplier = 1 + (Number(dutyPercent) || 0) / 100;
+
+    // Build Stripe line_items with currency conversion + custom duty
+    // Note: Prices in DB are in EUR; we convert to selected currency and apply duty
+    const centsDiscount = Math.round(
+      discountToApply * exchangeRate * dutyMultiplier * 100
+    );
     const itemLineCents = items.map((it) => {
       const eurUnit =
         it.sale_price !== undefined && it.sale_price !== null
           ? Number(it.sale_price)
           : Number(it.price || 0);
-      const convertedUnit = eurUnit * exchangeRate;
+      const convertedUnit = eurUnit * exchangeRate * dutyMultiplier;
       const qty = Number(it.qty || 1);
       return Math.round(convertedUnit * 100) * qty;
     });
@@ -425,7 +451,8 @@ module.exports.createCheckoutSession = catchAsync(async (req, res, next) => {
 
     // Optionally: if you want shipping as a stripe line item (recommended if you show shipping) add it:
     if (effectiveShippingCost > 0) {
-      const shippingInSelectedCurrency = effectiveShippingCost * exchangeRate;
+      const shippingInSelectedCurrency =
+        effectiveShippingCost * exchangeRate * dutyMultiplier;
       adjustedLineItems.push({
         price_data: {
           currency: selectedCurrency.toLowerCase(),
@@ -779,7 +806,7 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
     try {
 
       const { rows: userRows } = await client.query(
-        `SELECT full_name, email FROM users
+        `SELECT full_name, email, phone FROM users
          WHERE id = $1`,
         [user_id]
       );
@@ -788,6 +815,7 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
       const { rows } = await client.query(
         `
   SELECT
+    p.id AS product_id,
     p.name AS name,
     p.product_img AS image,
     oi.qty,
@@ -812,7 +840,10 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
       );
 
       orderItems = [...rows];
+      let dutyPercent = 0;
       if (user && orderItems.length > 0) {
+        const orderCurrency = orderItems[0]?.currency || "AED";
+        dutyPercent = await getCustomDutyForCurrency(client, orderCurrency);
         await emailQueue.add("sendCustomerEmail", {
           to: user.email,
           orderData: {
@@ -821,33 +852,40 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
             items: orderItems,
             payment_id: stripePaymentId,
             currency: orderItems[0]?.currency_symbol || "€",
+            duty_percent: dutyPercent,
           },
         });
       }
-      // try {
-      //   const adminEmails = await client
-      //     .query(
-      //       `SELECT email FROM admins WHERE role = 'superadmin' AND deleted_at IS NULL`
-      //     )
-      //     .then((result) => result.rows.map((row) => row.email));
-      //   await emailQueue.add("sendAdminEmail", {
-      //     toList: adminEmails,
-      //     orderData: {
-      //       customerName: user.full_name,
-      //       customerEmail: user.email,
-      //       customerPhone: user.phone || "N/A",
-      //       orderId: orderItems[0]?.order_no || order_id,
-      //       items: orderItems,
-      //       total: orderItems.reduce(
-      //         (acc, item) => acc + item.price * item.qty,
-      //         0
-      //       ),
-      //       currency: orderItems[0]?.currency_symbol || "€",
-      //     },
-      //   });
-      // } catch (adminErr) {
-      //   console.error("⚠️ Failed to send admin new order email:", adminErr);
-      // }
+      try {
+        const { rows: adminRows } = await client.query(
+          `SELECT email FROM admins
+           WHERE receive_order_notifications = true
+             AND is_active = true
+             AND deleted_at IS NULL`
+        );
+        const adminEmails = adminRows.map((row) => row.email).filter(Boolean);
+        if (adminEmails.length > 0 && user && orderItems.length > 0) {
+          const totalAmount = orderItems.reduce(
+            (acc, item) => acc + (item.price || 0) * (item.qty || 0),
+            0
+          );
+          await emailQueue.add("sendAdminEmail", {
+            toList: adminEmails,
+            orderData: {
+              customerName: user.full_name,
+              customerEmail: user.email,
+              customerPhone: user.phone || "N/A",
+              orderId: orderItems[0]?.order_no || order_id,
+              items: orderItems,
+              total: totalAmount,
+              currency: orderItems[0]?.currency_symbol || "€",
+              duty_percent: dutyPercent,
+            },
+          });
+        }
+      } catch (adminErr) {
+        console.error("⚠️ Failed to send admin new order email:", adminErr);
+      }
     } catch (mailErr) {
       console.error("Failed to send order confirmation email:", mailErr);
     }
@@ -939,6 +977,58 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
     //   console.error("❌ Failed to generate invoice PDF:", pdfErr);
     // }
 
+    const { rows: ordFinRows } = await client.query(
+      `SELECT order_no, total_amount, discount, currency
+       FROM orders
+       WHERE id = $1 AND deleted_at IS NULL`,
+      [order_id]
+    );
+    const ordFin = ordFinRows[0] || {};
+
+    let linesForGa4 = Array.isArray(orderItems) ? orderItems : [];
+    if (linesForGa4.length === 0) {
+      const { rows: gaLines } = await client.query(
+        `
+        SELECT
+          p.id AS product_id,
+          p.name AS name,
+          oi.qty,
+          oi.price,
+          pv.sku,
+          pv.normalized_size AS size
+        FROM order_items oi
+        JOIN product_variants pv ON pv.id = oi.variant_id
+        JOIN products p ON p.id = pv.product_id
+        WHERE oi.order_id = $1
+        `,
+        [order_id]
+      );
+      linesForGa4 = gaLines;
+    }
+
+    const purchaseValue = Math.max(
+      0,
+      Number(ordFin.total_amount || 0) - Number(ordFin.discount || 0)
+    );
+    const ga4Currency = String(ordFin.currency || "AED").toUpperCase();
+    const transactionId =
+      ordFin.order_no != null && String(ordFin.order_no).trim() !== ""
+        ? String(ordFin.order_no)
+        : String(order_id);
+
+    const ga4_purchase = {
+      transaction_id: transactionId,
+      value: purchaseValue,
+      currency: ga4Currency,
+      items: linesForGa4.map((row, index) => ({
+        item_id: String(row.sku || row.product_id || `item_${index}`),
+        item_name: row.name || "",
+        ...(row.size ? { item_variant: row.size } : {}),
+        price: Number(row.price) || 0,
+        quantity: Math.max(1, Number(row.qty) || 1),
+      })),
+    };
+
     return sendResponse(
       res,
       200,
@@ -946,10 +1036,11 @@ module.exports.verifyPayment = catchAsync(async (req, res, next) => {
       "Payment verified and order finalized",
       {
         order_id,
-        order_no: orderItems[0]?.order_no || order_id,
+        order_no: ordFin.order_no || orderItems?.[0]?.order_no || order_id,
         payment_id: stripePaymentId,
         status: stripeStatus,
         finalize: finalizeRes,
+        ga4_purchase,
       }
     );
   } catch (err) {

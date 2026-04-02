@@ -29,6 +29,8 @@ class VendorOrderManager {
       await client.query('BEGIN');
 
       // Step 1: Get order details
+      // Lock order row so concurrent verify-payment / placement runs serialize;
+      // otherwise two jobs can both pass "already placed" check and duplicate vendor API calls.
       const { rows: orderRows } = await client.query(`
         SELECT
           o.id,
@@ -42,6 +44,7 @@ class VendorOrderManager {
         FROM orders o
         JOIN users u ON u.id = o.user_id
         WHERE o.id = $1
+        FOR UPDATE OF o
       `, [orderId]);
 
       if (orderRows.length === 0) {
@@ -70,6 +73,7 @@ class VendorOrderManager {
           oi.price,
           oi.vendor_id,
           oi.vendor_order_status,
+          oi.vendor_order_id,
           v.name AS vendor_name,
           v.integration_type,
           v.capabilities,
@@ -170,6 +174,11 @@ class VendorOrderManager {
           continue;
         }
 
+        // Existing vendor_order_id (e.g. from a previous successful placement on retry) so vendor can treat "already taken" as success
+        const existingVendorOrderId = vendorData.items.every(i => i.vendor_order_id === vendorData.items[0].vendor_order_id)
+          ? (vendorData.items[0].vendor_order_id || null)
+          : null;
+
         // Prepare order data
         const orderData = {
           orderId: order.id,
@@ -181,7 +190,8 @@ class VendorOrderManager {
             email: order.email,
             full_name: order.full_name,
             phone: order.phone
-          }
+          },
+          existingVendorOrderId: existingVendorOrderId || undefined
         };
 
         // Submit order to vendor

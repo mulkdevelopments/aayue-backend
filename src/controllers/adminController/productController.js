@@ -5,6 +5,17 @@ const AppError = require("../../errorHandling/AppError");
 const sendResponse = require("../../utils/sendResponse");
 const { isValidUUID } = require("../../utils/basicValidation");
 const CategoryService = require("../../services/categoryService");
+const {
+  rewriteDescription,
+  suggestQuarantineFix,
+} = require("../../services/aiDescriptionRewriteService");
+const {
+  PG_COMPOSITE_COLOR_SPLIT_REGEX_E,
+  SQL_EXCLUDE_JUNK_COLOR_TOKEN_T,
+  SQL_EXCLUDE_JUNK_VARIANT_COLOR_ONLY_PV,
+  normalizeColorFilterParams,
+  sqlVariantMatchesColorParams,
+} = require("../../utils/colorFilterSql");
 
 function validateCategoryIds(category_ids = []) {
   if (!Array.isArray(category_ids)) return false;
@@ -97,6 +108,8 @@ module.exports.createProduct = catchAsync(async (req, res, next) => {
  *  - page (int, default 1)
  *  - limit (int, default 20, max 100)
  *  - include = variants,categories,filters,media  (comma-separated, optional)
+ *  - light=1 (or picker=1) — with q and no other filters, use fast minimal search for admin pickers only.
+ *    Omit for full inventory-style payload (default).
  */
 module.exports.getProducts = catchAsync(async (req, res, next) => {
   const client = await dbPool.connect();
@@ -122,9 +135,9 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
       page: pageQ,
       limit: limitQ,
       include = "variants,categories,filters,media",
+      light,
+      picker,
     } = req.query;
-
-    console.log(sort_by, sort_order, "1111111111111");
 
     // dynamic filters can be provided as repeated query param: dynamic_filter=type:name
     // If sent as comma-separated in a single param, split as well.
@@ -190,6 +203,41 @@ module.exports.getProducts = catchAsync(async (req, res, next) => {
         .map((s) => s.trim())
         .filter(Boolean)
     );
+
+    // Lightweight path: only when explicitly requested (hero / best-sellers / new-arrivals pickers).
+    // Inventory search uses q without `light=1` and must receive the full getProducts payload.
+    const lightFlag = light ?? picker;
+    const wantLightPickerSearch =
+      lightFlag === "1" ||
+      String(lightFlag || "").toLowerCase() === "true";
+    const hasFilters =
+      resolvedCategoryId ||
+      brand ||
+      vendor_id ||
+      !isNaN(Number(min_price)) ||
+      !isNaN(Number(max_price)) ||
+      color ||
+      size ||
+      gender ||
+      country ||
+      sku ||
+      (Array.isArray(dynamic_filters) && dynamic_filters.length > 0);
+    if (q && !hasFilters && wantLightPickerSearch) {
+      const lightResult = await ProductService.getProductsSearchLight(
+        { q, limit, offset },
+        client
+      );
+      const totalPages = Math.max(1, Math.ceil(lightResult.total / limit));
+      return sendResponse(res, 200, true, "Products fetched", {
+        total: lightResult.total,
+        mapped_total: 0,
+        inactive_total: 0,
+        page,
+        limit,
+        total_pages: totalPages,
+        products: lightResult.products,
+      });
+    }
 
     // build options object to pass into service
     const options = {
@@ -511,6 +559,7 @@ module.exports.getProductsFromOurCategories = catchAsync(
         q,
         category_id,
         category_slug,
+        curated_slug,
         vendor_id,
         min_price,
         max_price,
@@ -580,6 +629,7 @@ module.exports.getProductsFromOurCategories = catchAsync(
       const options = {
         q,
         category_id: resolvedCategoryId,
+        curated_slug: curated_slug && String(curated_slug).trim() ? String(curated_slug).trim().toLowerCase() : null,
         vendor_id,
         brands,
         colors,
@@ -1211,6 +1261,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     /** STEP-2: Base WHERE */
     let baseParams = [];
     let baseWhere = `p.deleted_at IS NULL
+      AND p.is_active = TRUE
       AND (p.vendor_id IS NULL OR EXISTS (
         SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active'
       ))`;
@@ -1240,9 +1291,17 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       baseWhere += ` AND p.vendor_id = $${baseParams.length}`;
     }
 
+    // Match DB brand_name_normalized: replace non-alphanumeric with space, collapse spaces, trim, lower (e.g. "Dolce & Gabbana" -> "dolce gabbana")
     const normalizeBrands = (items = []) =>
       items
-        .map((b) => String(b).trim().replace(/\s+/g, " ").toLowerCase())
+        .map((b) =>
+          String(b)
+            .trim()
+            .replace(/[^a-zA-Z0-9]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase()
+        )
         .filter(Boolean);
 
     const buildWhere = ({
@@ -1258,7 +1317,8 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
 
       if (includeBrand && brands.length > 0) {
         params.push(normalizeBrands(brands));
-        where += ` AND p.brand_name_normalized = ANY($${params.length})`;
+        // Compare with collapsed spaces so "dolce  gabbana" (DB) matches "dolce gabbana" (param)
+        where += ` AND TRIM(REGEXP_REPLACE(COALESCE(p.brand_name_normalized, ''), '\\s+', ' ', 'g')) = ANY($${params.length})`;
       }
 
       if (includeSize && sizes.length > 0) {
@@ -1272,11 +1332,11 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       }
 
       if (includeColor && colors.length > 0) {
-        params.push(colors);
-        where += ` AND (
-          pv.normalized_color = ANY($${params.length}) OR
-          pv.attributes->>'color' = ANY($${params.length})
-        )`;
+        const colorParams = normalizeColorFilterParams(colors);
+        if (colorParams.length > 0) {
+          params.push(colorParams);
+          where += ` AND ${sqlVariantMatchesColorParams("pv", params.length)}`;
+        }
       }
 
       if (includeGender && genders.length > 0) {
@@ -1300,136 +1360,181 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       }
 
       if (includeSearch && q) {
-        params.push(`%${q.toLowerCase()}%`);
-        where += `
-          AND (
-            LOWER(p.name) LIKE $${params.length} OR
-            p.brand_name_normalized LIKE $${params.length} OR
-            LOWER(p.short_description) LIKE $${params.length} OR
-            LOWER(p.description) LIKE $${params.length} OR
-            LOWER(pv.variant_size) LIKE $${params.length} OR
-            LOWER(pv.normalized_color) LIKE $${params.length}
-          )
-        `;
+        const tokens = String(q)
+          .trim()
+          .toLowerCase()
+          .split(/\s+/)
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .slice(0, 5);
+        if (tokens.length > 0) {
+          const tokenClauses = [];
+          tokens.forEach((token) => {
+            params.push(`%${token}%`);
+            const key = params.length;
+            tokenClauses.push(`
+              (
+                LOWER(p.name) LIKE $${key} OR
+                p.brand_name_normalized LIKE $${key} OR
+                LOWER(p.short_description) LIKE $${key} OR
+                LOWER(pv.variant_size) LIKE $${key} OR
+                LOWER(pv.normalized_color) LIKE $${key}
+              )
+            `);
+          });
+          where += ` AND ${tokenClauses.join(" AND ")}`;
+        }
       }
 
       return { where, params };
     };
 
-    /** STEP-4: Full filter set from search results */
-    const brandFiltersSQL = `
-      SELECT
-        ARRAY_AGG(display_name ORDER BY display_name) AS brands
-      FROM (
-        SELECT
+    /** STEP-4+5: Facets — one MATERIALIZED scan per filter context (list + counts merged; was 8 queries, now 4) */
+    const mergedBrandFacetsSQL = `
+      WITH brand_facets AS MATERIALIZED (
+        SELECT DISTINCT p.id AS product_id,
           p.brand_name_normalized,
-          MIN(p.brand_name) AS display_name
+          p.brand_name
         FROM products p
         INNER JOIN product_our_category_map pom ON pom.product_id = p.id
         LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
         WHERE __WHERE__ AND p.brand_name_normalized IS NOT NULL
-        GROUP BY p.brand_name_normalized
-      ) b;
+      )
+      SELECT
+        COALESCE((
+          SELECT array_agg(display_name ORDER BY display_name)
+          FROM (
+            SELECT MIN(brand_name) AS display_name
+            FROM brand_facets
+            GROUP BY brand_name_normalized
+          ) x
+        ), ARRAY[]::text[]) AS brands,
+        COALESCE((
+          SELECT json_agg(
+            json_build_object(
+              'value', brand_name_normalized,
+              'label', min_brand,
+              'count', cnt
+            ) ORDER BY min_brand
+          )
+          FROM (
+            SELECT brand_name_normalized,
+                   MIN(brand_name) AS min_brand,
+                   COUNT(DISTINCT product_id)::int AS cnt
+            FROM brand_facets
+            GROUP BY brand_name_normalized
+          ) y
+        ), '[]'::json) AS brand_counts_json;
     `;
 
-    const brandCountsSQL = `
+    const mergedColorFacetsSQL = `
+      WITH color_tokens AS MATERIALIZED (
+        SELECT p.id AS product_id,
+               lower(trim(t)) AS token_lc
+        FROM products p
+        INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+        INNER JOIN product_variants pv ON pv.product_id = p.id
+          AND pv.deleted_at IS NULL
+          AND NULLIF(TRIM(COALESCE(pv.normalized_color, pv.attributes->>'color', '')), '') IS NOT NULL
+        CROSS JOIN LATERAL unnest(
+          regexp_split_to_array(
+            TRIM(COALESCE(pv.normalized_color, pv.attributes->>'color')),
+            E'${PG_COMPOSITE_COLOR_SPLIT_REGEX_E}'
+          )
+        ) AS u(t)
+        WHERE __WHERE__
+          AND NULLIF(TRIM(t), '') IS NOT NULL
+          AND ${SQL_EXCLUDE_JUNK_COLOR_TOKEN_T}
+          AND ${SQL_EXCLUDE_JUNK_VARIANT_COLOR_ONLY_PV}
+      )
       SELECT
-        p.brand_name_normalized AS value,
-        MIN(p.brand_name) AS label,
-        COUNT(DISTINCT p.id)::int AS count
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__ AND p.brand_name_normalized IS NOT NULL
-      GROUP BY p.brand_name_normalized
-      ORDER BY label ASC
+        COALESCE((
+          SELECT array_agg(display_color ORDER BY display_color)
+          FROM (
+            SELECT DISTINCT initcap(token_lc) AS display_color
+            FROM color_tokens
+            WHERE token_lc IS NOT NULL AND token_lc <> ''
+          ) cn
+        ), ARRAY[]::text[]) AS colors,
+        COALESCE((
+          SELECT json_agg(
+            json_build_object(
+              'value', disp,
+              'count', cnt
+            ) ORDER BY disp
+          )
+          FROM (
+            SELECT initcap(token_lc) AS disp,
+                   COUNT(DISTINCT product_id)::int AS cnt
+            FROM color_tokens
+            WHERE token_lc IS NOT NULL AND token_lc <> ''
+            GROUP BY token_lc
+          ) cc
+        ), '[]'::json) AS color_counts_json;
     `;
 
-    const colorFiltersSQL = `
-      SELECT
-          ARRAY_AGG(
-            DISTINCT COALESCE(pv.normalized_color, pv.attributes->>'color')
-          ) FILTER (WHERE COALESCE(pv.normalized_color, pv.attributes->>'color') IS NOT NULL) AS colors
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__;
-    `;
-
-    const colorCountsSQL = `
-      SELECT
-        COALESCE(pv.normalized_color, pv.attributes->>'color') AS value,
-        COUNT(DISTINCT p.id)::int AS count
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__ AND COALESCE(pv.normalized_color, pv.attributes->>'color') IS NOT NULL
-      GROUP BY COALESCE(pv.normalized_color, pv.attributes->>'color')
-      ORDER BY value ASC
-    `;
-
-    const sizeFiltersSQL = `
-      SELECT
-        ARRAY_AGG(
-          DISTINCT COALESCE(
+    const mergedSizeFacetsSQL = `
+      WITH size_facets AS MATERIALIZED (
+        SELECT DISTINCT p.id AS product_id,
+          COALESCE(
             pv.normalized_size_final,
             pv.normalized_size,
             pv.variant_size,
             pv.attributes->>'size'
+          ) AS size_val
+        FROM products p
+        INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+        LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+        WHERE __WHERE__
+          AND COALESCE(
+            pv.normalized_size_final,
+            pv.normalized_size,
+            pv.variant_size,
+            pv.attributes->>'size'
+          ) IS NOT NULL
+      )
+      SELECT
+        COALESCE((
+          SELECT array_agg(size_val ORDER BY size_val)
+          FROM (SELECT DISTINCT size_val FROM size_facets) s
+        ), ARRAY[]::text[]) AS sizes,
+        COALESCE((
+          SELECT json_agg(
+            json_build_object('value', size_val, 'count', cnt) ORDER BY size_val
           )
-        ) FILTER (WHERE COALESCE(
-          pv.normalized_size_final,
-          pv.normalized_size,
-          pv.variant_size,
-          pv.attributes->>'size'
-        ) IS NOT NULL) AS sizes
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__;
+          FROM (
+            SELECT size_val, COUNT(DISTINCT product_id)::int AS cnt
+            FROM size_facets
+            GROUP BY size_val
+          ) sc
+        ), '[]'::json) AS size_counts_json;
     `;
 
-    const sizeCountsSQL = `
+    const mergedGenderFacetsSQL = `
+      WITH gender_facets AS MATERIALIZED (
+        SELECT DISTINCT p.id AS product_id,
+          LOWER(TRIM(p.gender)) AS gender_lc
+        FROM products p
+        INNER JOIN product_our_category_map pom ON pom.product_id = p.id
+        LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
+        WHERE __WHERE__
+          AND p.gender IS NOT NULL AND TRIM(p.gender) <> ''
+      )
       SELECT
-        COALESCE(
-          pv.normalized_size_final,
-          pv.normalized_size,
-          pv.variant_size,
-          pv.attributes->>'size'
-        ) AS value,
-        COUNT(DISTINCT p.id)::int AS count
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__ AND COALESCE(
-        pv.normalized_size_final,
-        pv.normalized_size,
-        pv.variant_size,
-        pv.attributes->>'size'
-      ) IS NOT NULL
-      GROUP BY value
-      ORDER BY value ASC
-    `;
-
-    const genderFiltersSQL = `
-      SELECT
-          ARRAY_AGG(DISTINCT LOWER(p.gender)) FILTER (WHERE p.gender IS NOT NULL AND p.gender <> '') AS genders
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__;
-    `;
-
-    const genderCountsSQL = `
-      SELECT
-        LOWER(p.gender) AS value,
-        COUNT(DISTINCT p.id)::int AS count
-      FROM products p
-      INNER JOIN product_our_category_map pom ON pom.product_id = p.id
-      LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
-      WHERE __WHERE__ AND p.gender IS NOT NULL AND p.gender <> ''
-      GROUP BY LOWER(p.gender)
-      ORDER BY value ASC
+        COALESCE((
+          SELECT array_agg(gender_lc ORDER BY gender_lc)
+          FROM (SELECT DISTINCT gender_lc FROM gender_facets) g
+        ), ARRAY[]::text[]) AS genders,
+        COALESCE((
+          SELECT json_agg(
+            json_build_object('value', gender_lc, 'count', cnt) ORDER BY gender_lc
+          )
+          FROM (
+            SELECT gender_lc, COUNT(DISTINCT product_id)::int AS cnt
+            FROM gender_facets
+            GROUP BY gender_lc
+          ) gc
+        ), '[]'::json) AS gender_counts_json;
     `;
 
     /** STEP-5: Price range affected by q + filters */
@@ -1450,52 +1555,52 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     const genderWhere = buildWhere({ includeBrand: true, includeColor: true, includeSize: true, includeGender: false });
     const priceWhere = buildWhere({ includeBrand: true, includeColor: true, includeSize: true, includeGender: true });
 
-    const [
-      brandRes,
-      brandCountsRes,
-      colorRes,
-      colorCountsRes,
-      sizeRes,
-      sizeCountsRes,
-      genderRes,
-      genderCountsRes,
-      activeFiltersRes,
-    ] = await Promise.all([
-      client.query(brandFiltersSQL.replace("__WHERE__", brandWhere.where), brandWhere.params),
-      client.query(brandCountsSQL.replace("__WHERE__", brandWhere.where), brandWhere.params),
-      client.query(colorFiltersSQL.replace("__WHERE__", colorWhere.where), colorWhere.params),
-      client.query(colorCountsSQL.replace("__WHERE__", colorWhere.where), colorWhere.params),
-      client.query(sizeFiltersSQL.replace("__WHERE__", sizeWhere.where), sizeWhere.params),
-      client.query(sizeCountsSQL.replace("__WHERE__", sizeWhere.where), sizeWhere.params),
-      client.query(genderFiltersSQL.replace("__WHERE__", genderWhere.where), genderWhere.params),
-      client.query(genderCountsSQL.replace("__WHERE__", genderWhere.where), genderWhere.params),
-      client.query(activeFiltersSQL.replace("__WHERE__", priceWhere.where), priceWhere.params),
-    ]);
+    const childCatsSql = `SELECT id, name, slug FROM categories WHERE parent_id = $1 AND is_our_category = true AND deleted_at IS NULL`;
 
-    let childCats = [];
-    if (category_id) {
-      const subRes = await client.query(
-        `SELECT id, name, slug FROM categories WHERE parent_id = $1 AND is_our_category = true AND deleted_at IS NULL`,
-        [category_id]
-      );
-      childCats = subRes.rows;
-    }
+    const jsonAggRows = (v) => {
+      if (v == null) return [];
+      if (Array.isArray(v)) return v;
+      if (typeof v === "string") {
+        try {
+          const p = JSON.parse(v);
+          return Array.isArray(p) ? p : [];
+        } catch {
+          return [];
+        }
+      }
+      return [];
+    };
+
+    const [brandMerged, colorMerged, sizeMerged, genderMerged, activeFiltersRes, childCatsRes] =
+      await Promise.all([
+        client.query(mergedBrandFacetsSQL.replace("__WHERE__", brandWhere.where), brandWhere.params),
+        client.query(mergedColorFacetsSQL.replace("__WHERE__", colorWhere.where), colorWhere.params),
+        client.query(mergedSizeFacetsSQL.replace("__WHERE__", sizeWhere.where), sizeWhere.params),
+        client.query(mergedGenderFacetsSQL.replace("__WHERE__", genderWhere.where), genderWhere.params),
+        client.query(activeFiltersSQL.replace("__WHERE__", priceWhere.where), priceWhere.params),
+        category_id ? client.query(childCatsSql, [category_id]) : Promise.resolve({ rows: [] }),
+      ]);
+
+    const rowB = brandMerged.rows[0] || {};
+    const rowC = colorMerged.rows[0] || {};
+    const rowS = sizeMerged.rows[0] || {};
+    const rowG = genderMerged.rows[0] || {};
 
     return sendResponse(res, 200, true, "Filters fetched", {
-      brands: brandRes.rows[0].brands || [],
-      brand_counts: brandCountsRes.rows || [],
-      colors: colorRes.rows[0].colors || [],
-      color_counts: colorCountsRes.rows || [],
-      sizes: sizeRes.rows[0].sizes || [],
-      size_counts: sizeCountsRes.rows || [],
-      genders: genderRes.rows[0].genders || [],
-      gender_counts: genderCountsRes.rows || [],
+      brands: rowB.brands || [],
+      brand_counts: jsonAggRows(rowB.brand_counts_json),
+      colors: rowC.colors || [],
+      color_counts: jsonAggRows(rowC.color_counts_json),
+      sizes: rowS.sizes || [],
+      size_counts: jsonAggRows(rowS.size_counts_json),
+      genders: rowG.genders || [],
+      gender_counts: jsonAggRows(rowG.gender_counts_json),
       price: {
         min: Number(activeFiltersRes.rows[0].min_price || 0),
         max: Number(activeFiltersRes.rows[0].max_price || 0),
       },
       total: Number(activeFiltersRes.rows[0].total || 0),
-      child_categories: childCats,
+      child_categories: childCatsRes.rows || [],
     });
   } catch (err) {
     console.error("getDynamicFilters Error:", err);
@@ -1657,13 +1762,14 @@ module.exports.getProductByIdAdmin = catchAsync(async (req, res, next) => {
   const client = await dbPool.connect();
   try {
     const id = req.query.productId;
+    const includeDeleted = req.query.includeDeleted === "1" || req.query.includeDeleted === "true";
 
     if (!id || !isValidUUID(id)) {
       client.release();
       return next(new AppError("Invalid or missing product ID", 400));
     }
 
-    const product = await ProductService.getProductByIdAdmin(id, client);
+    const product = await ProductService.getProductByIdAdmin(id, client, { includeDeleted });
     if (!product) {
       client.release();
       return next(new AppError("Product not found", 404));
@@ -1916,6 +2022,562 @@ module.exports.toggleProductStatus = catchAsync(async (req, res, next) => {
   }
 });
 
+module.exports.updateProduct = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const { product_id, product, variants } = req.body || {};
+    if (!product_id || !isValidUUID(product_id)) {
+      client.release();
+      return next(new AppError("Valid product_id is required", 400));
+    }
+    const result = await ProductService.updateProductAdmin(
+      product_id,
+      { product: product || {}, variants: Array.isArray(variants) ? variants : [] },
+      client
+    );
+    return sendResponse(res, 200, true, "Product updated (marked as manually edited)", result);
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.generateOurDescription = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const productId = req.body?.productId || req.body?.product_id;
+    if (!productId || !isValidUUID(productId)) {
+      client.release();
+      return next(new AppError("Valid productId is required", 400));
+    }
+    const product = await ProductService.getProductByIdAdmin(productId, client);
+    if (!product) {
+      client.release();
+      return next(new AppError("Product not found", 404));
+    }
+    const hasDesc = (product.description || product.short_description || "").trim();
+    if (!hasDesc) {
+      client.release();
+      return next(new AppError("Product has no description to rewrite", 400));
+    }
+    const result = await rewriteDescription(product);
+    if (result && typeof result === "object" && result.suspicious === true) {
+      const reason = result.reason || "Name and description describe different product types";
+      await ProductService.markProductSuspicious(productId, reason, client);
+      client.release();
+      return next(new AppError(reason, 400));
+    }
+    const ourDesc = typeof result === "string" ? result : "";
+    if (!ourDesc.trim()) {
+      client.release();
+      return next(new AppError("No description generated", 400));
+    }
+    await ProductService.updateOurDescription(productId, ourDesc, client);
+    return sendResponse(res, 200, true, "Our description generated", { our_description: ourDesc });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.softDeleteProduct = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const product_id = req.body?.product_id || req.body?.productId || req.params?.id;
+    if (!product_id || !isValidUUID(product_id)) {
+      client.release();
+      return next(new AppError("Valid product_id is required", 400));
+    }
+    const result = await ProductService.softDeleteProduct(product_id, client);
+    return sendResponse(res, 200, true, "Product deleted (soft delete)", result);
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+const BULK_ACTIONS = ["delete", "set_inactive", "set_active"];
+const BULK_MAX_IDS = 200;
+
+module.exports.bulkProductAction = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const product_ids = req.body?.product_ids;
+    const action = (req.body?.action || "").toLowerCase();
+
+    if (!Array.isArray(product_ids) || product_ids.length === 0) {
+      client.release();
+      return next(new AppError("product_ids array is required and must not be empty", 400));
+    }
+    if (!BULK_ACTIONS.includes(action)) {
+      client.release();
+      return next(new AppError("action must be one of: delete, set_inactive, set_active", 400));
+    }
+    const ids = product_ids.filter((id) => typeof id === "string" && isValidUUID(id.trim()));
+    if (ids.length === 0) {
+      client.release();
+      return next(new AppError("No valid product IDs provided", 400));
+    }
+    if (ids.length > BULK_MAX_IDS) {
+      client.release();
+      return next(new AppError(`Maximum ${BULK_MAX_IDS} products per request`, 400));
+    }
+
+    await client.query("BEGIN");
+
+    if (action === "delete") {
+      await client.query(
+        "UPDATE product_variants SET deleted_at = NOW(), updated_at = NOW() WHERE product_id = ANY($1::uuid[]) AND deleted_at IS NULL",
+        [ids]
+      );
+      await client.query(
+        "UPDATE products SET deleted_at = NOW(), is_active = false, updated_at = NOW() WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL",
+        [ids]
+      );
+    } else {
+      const isActive = action === "set_active";
+      await client.query(
+        "UPDATE products SET is_active = $1, updated_at = NOW() WHERE id = ANY($2::uuid[]) AND deleted_at IS NULL",
+        [isActive, ids]
+      );
+      await client.query(
+        "UPDATE product_variants SET is_active = $1, updated_at = NOW() WHERE product_id = ANY($2::uuid[]) AND deleted_at IS NULL",
+        [isActive, ids]
+      );
+      await client.query(
+        `UPDATE product_dynamic_filters SET is_active = $1 WHERE product_id = ANY($2::uuid[]) AND deleted_at IS NULL`,
+        [isActive, ids]
+      );
+      await client.query(
+        `UPDATE media SET is_active = $1 WHERE variant_id IN (SELECT id FROM product_variants WHERE product_id = ANY($2::uuid[])) AND deleted_at IS NULL`,
+        [isActive, ids]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    const message =
+      action === "delete"
+        ? `${ids.length} product(s) deleted`
+        : action === "set_inactive"
+          ? `${ids.length} product(s) set inactive`
+          : `${ids.length} product(s) set active`;
+    return sendResponse(res, 200, true, message, { count: ids.length, product_ids: ids });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.getDeletedOrSuspiciousProducts = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const filter = req.query.filter || "all"; // all | deleted | suspicious
+    const { total, products } = await ProductService.getDeletedOrSuspiciousProducts(
+      { page, limit, filter },
+      client
+    );
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    return sendResponse(res, 200, true, "Deleted/suspicious products", {
+      products,
+      total,
+      page,
+      limit,
+      totalPages,
+    });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.recoverProduct = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const product_id = req.body?.product_id || req.body?.productId || req.params?.id;
+    if (!product_id || !isValidUUID(product_id)) {
+      client.release();
+      return next(new AppError("Valid product_id is required", 400));
+    }
+    const result = await ProductService.recoverProduct(product_id, client);
+    return sendResponse(res, 200, true, "Product recovered (sync can update again)", result);
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+const BULK_RECOVER_MAX = 200;
+
+module.exports.bulkRecoverProducts = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const product_ids = req.body?.product_ids;
+    if (!Array.isArray(product_ids) || product_ids.length === 0) {
+      client.release();
+      return next(new AppError("product_ids array is required and must not be empty", 400));
+    }
+    const ids = product_ids.filter((id) => typeof id === "string" && isValidUUID(id.trim()));
+    if (ids.length === 0) {
+      client.release();
+      return next(new AppError("No valid product IDs provided", 400));
+    }
+    if (ids.length > BULK_RECOVER_MAX) {
+      client.release();
+      return next(new AppError(`Maximum ${BULK_RECOVER_MAX} products per request`, 400));
+    }
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE product_variants SET deleted_at = NULL, updated_at = NOW() WHERE product_id = ANY($1::uuid[])",
+      [ids]
+    );
+    await client.query(
+      `UPDATE products SET suspicious_at = NULL, suspicious_reason = NULL, deleted_at = NULL, is_active = true, updated_at = NOW() WHERE id = ANY($1::uuid[])`,
+      [ids]
+    );
+    await client.query("COMMIT");
+    return sendResponse(res, 200, true, `${ids.length} product(s) recovered`, { count: ids.length, product_ids: ids });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * POST /admin/quarantine-review-suggest
+ * Body: { product_id }
+ */
+module.exports.quarantineReviewSuggest = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const productId = req.body?.product_id || req.body?.productId;
+    if (!productId || !isValidUUID(productId)) {
+      return next(new AppError("Valid product_id is required", 400));
+    }
+
+    const product = await ProductService.getProductByIdAdmin(productId, client, {
+      includeDeleted: true,
+    });
+    if (!product) {
+      return next(new AppError("Product not found", 404));
+    }
+    if (!product.suspicious_at) {
+      return next(
+        new AppError("Product is not quarantined (no suspicious flag)", 400)
+      );
+    }
+
+    const suggestion = await suggestQuarantineFix(
+      product,
+      product.suspicious_reason || ""
+    );
+
+    return sendResponse(res, 200, true, "Suggestion generated", {
+      product_id: productId,
+      suspicious_reason: product.suspicious_reason,
+      ...suggestion,
+    });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * POST /admin/quarantine-review-apply
+ * Body: { product_id, product: { name?, title?, ... }, recover?: boolean }
+ */
+module.exports.quarantineReviewApply = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const productId = req.body?.product_id || req.body?.productId;
+    const productPatch = req.body?.product || {};
+    const recover =
+      req.body?.recover !== false && req.body?.recover !== "false";
+
+    if (!productId || !isValidUUID(productId)) {
+      return next(new AppError("Valid product_id is required", 400));
+    }
+    if (!productPatch || typeof productPatch !== "object") {
+      return next(
+        new AppError("product object with fields to save is required", 400)
+      );
+    }
+
+    await client.query("BEGIN");
+    await ProductService.updateProductAdminForQuarantine(
+      productId,
+      { product: productPatch },
+      client
+    );
+    let recovered = null;
+    if (recover) {
+      recovered = await ProductService.recoverProduct(productId, client);
+    }
+    await client.query("COMMIT");
+
+    return sendResponse(
+      res,
+      200,
+      true,
+      recover ? "Saved and recovered" : "Saved",
+      {
+        product_id: productId,
+        recovered: Boolean(recover),
+        result: recovered,
+      }
+    );
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.getCompetitorBlacklist = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const { rows } = await client.query(
+      "SELECT id, name, created_at FROM competitor_blacklist ORDER BY LOWER(name)"
+    );
+    return sendResponse(res, 200, true, "Competitor blacklist", { list: rows });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.addCompetitorBlacklist = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const name = req.body?.name ? String(req.body.name).trim() : "";
+    if (!name) {
+      client.release();
+      return next(new AppError("name is required", 400));
+    }
+    const { rows } = await client.query(
+      "INSERT INTO competitor_blacklist (name) VALUES ($1) ON CONFLICT (name) DO NOTHING RETURNING id, name, created_at",
+      [name]
+    );
+    const item = rows[0] || null;
+    return sendResponse(res, 200, true, item ? "Added to blacklist" : "Already in blacklist", item);
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.deleteCompetitorBlacklist = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const id = req.params?.id;
+    if (!id || !isValidUUID(id)) {
+      client.release();
+      return next(new AppError("Valid id is required", 400));
+    }
+    const { rowCount } = await client.query(
+      "DELETE FROM competitor_blacklist WHERE id = $1",
+      [id]
+    );
+    return sendResponse(res, 200, true, rowCount ? "Removed from blacklist" : "Not found", { deleted: rowCount > 0 });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.getMarginSettings = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const vendorId = req.query.vendor_id || null;
+    let row = null;
+    if (vendorId && isValidUUID(vendorId)) {
+      const { rows } = await client.query(
+        `SELECT id, vendor_id, high_threshold, mid_threshold, margin_high_percent, margin_mid_percent, margin_low_percent, updated_at
+         FROM margin_settings WHERE vendor_id = $1 LIMIT 1`,
+        [vendorId]
+      );
+      row = rows[0] || null;
+    }
+    if (!row) {
+      const { rows } = await client.query(
+        `SELECT id, vendor_id, high_threshold, mid_threshold, margin_high_percent, margin_mid_percent, margin_low_percent, updated_at
+         FROM margin_settings WHERE vendor_id IS NULL LIMIT 1`
+      );
+      row = rows[0] || null;
+    }
+    const data = row
+      ? {
+          vendor_id: row.vendor_id,
+          high_threshold: Number(row.high_threshold),
+          mid_threshold: Number(row.mid_threshold),
+          margin_high_percent: Number(row.margin_high_percent),
+          margin_mid_percent: Number(row.margin_mid_percent),
+          margin_low_percent: Number(row.margin_low_percent),
+          updated_at: row.updated_at,
+        }
+      : null;
+    return sendResponse(res, 200, true, "Margin settings", data);
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.listMarginSettings = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT m.id, m.vendor_id, m.high_threshold, m.mid_threshold, m.margin_high_percent, m.margin_mid_percent, m.margin_low_percent, m.updated_at,
+              v.name AS vendor_name
+       FROM margin_settings m
+       LEFT JOIN vendors v ON v.id = m.vendor_id
+       ORDER BY m.vendor_id NULLS FIRST`
+    );
+    const list = rows.map((r) => ({
+      vendor_id: r.vendor_id,
+      vendor_name: r.vendor_name || "Default",
+      high_threshold: Number(r.high_threshold),
+      mid_threshold: Number(r.mid_threshold),
+      margin_high_percent: Number(r.margin_high_percent),
+      margin_mid_percent: Number(r.margin_mid_percent),
+      margin_low_percent: Number(r.margin_low_percent),
+      updated_at: r.updated_at,
+    }));
+    return sendResponse(res, 200, true, "Margin settings list", { list });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.updateMarginSettings = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const {
+      vendor_id: vendorId,
+      high_threshold,
+      mid_threshold,
+      margin_high_percent,
+      margin_mid_percent,
+      margin_low_percent,
+    } = req.body || {};
+    const vId = vendorId && isValidUUID(vendorId) ? vendorId : null;
+    const high = high_threshold != null && !Number.isNaN(Number(high_threshold)) ? Number(high_threshold) : null;
+    const mid = mid_threshold != null && !Number.isNaN(Number(mid_threshold)) ? Number(mid_threshold) : null;
+    const mHigh = margin_high_percent != null && !Number.isNaN(Number(margin_high_percent)) ? Number(margin_high_percent) : null;
+    const mMid = margin_mid_percent != null && !Number.isNaN(Number(margin_mid_percent)) ? Number(margin_mid_percent) : null;
+    const mLow = margin_low_percent != null && !Number.isNaN(Number(margin_low_percent)) ? Number(margin_low_percent) : null;
+
+    const existing = await client.query(
+      "SELECT id FROM margin_settings WHERE " + (vId ? "vendor_id = $1" : "vendor_id IS NULL") + " LIMIT 1",
+      vId ? [vId] : []
+    );
+    const defaults = { high_threshold: 1000, mid_threshold: 501, margin_high_percent: 28, margin_mid_percent: 37, margin_low_percent: 45 };
+    if (existing.rows.length) {
+      const updates = [];
+      const values = [];
+      let idx = 1;
+      if (high != null) { updates.push(`high_threshold = $${idx}`); values.push(high); idx++; }
+      if (mid != null) { updates.push(`mid_threshold = $${idx}`); values.push(mid); idx++; }
+      if (mHigh != null) { updates.push(`margin_high_percent = $${idx}`); values.push(mHigh); idx++; }
+      if (mMid != null) { updates.push(`margin_mid_percent = $${idx}`); values.push(mMid); idx++; }
+      if (mLow != null) { updates.push(`margin_low_percent = $${idx}`); values.push(mLow); idx++; }
+      if (updates.length === 0) {
+        client.release();
+        return next(new AppError("At least one margin field is required", 400));
+      }
+      updates.push("updated_at = NOW()");
+      values.push(existing.rows[0].id);
+      await client.query(`UPDATE margin_settings SET ${updates.join(", ")} WHERE id = $${idx}`, values);
+    } else {
+      await client.query(
+        `INSERT INTO margin_settings (vendor_id, high_threshold, mid_threshold, margin_high_percent, margin_mid_percent, margin_low_percent)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [vId, high ?? defaults.high_threshold, mid ?? defaults.mid_threshold, mHigh ?? defaults.margin_high_percent, mMid ?? defaults.margin_mid_percent, mLow ?? defaults.margin_low_percent]
+      );
+    }
+    const { getMarginSettings } = require("../../utils/marginHelper");
+    const config = await getMarginSettings(client, vId);
+    const data = {
+      vendor_id: vId,
+      high_threshold: config.highThreshold,
+      mid_threshold: config.midThreshold,
+      margin_high_percent: config.marginHigh,
+      margin_mid_percent: config.marginMid,
+      margin_low_percent: config.marginLow,
+    };
+    return sendResponse(res, 200, true, "Margin settings updated", data);
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.applyMarginNow = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const { getMarginSettings, computeTieredPricing } = require("../../utils/marginHelper");
+    const vendorId = req.body?.vendor_id || null;
+    const vId = vendorId && isValidUUID(vendorId) ? vendorId : null;
+
+    const variantsRes = await client.query(
+      `SELECT pv.id, pv.product_id, pv.vendorsaleprice, pv.vendormrp, p.vendor_id
+       FROM product_variants pv
+       JOIN products p ON p.id = pv.product_id AND p.deleted_at IS NULL
+       WHERE pv.deleted_at IS NULL
+         AND pv.vendorsaleprice IS NOT NULL AND (pv.vendorsaleprice::numeric) > 0
+         AND (($1 IS NOT NULL AND p.vendor_id = $1) OR ($1 IS NULL AND p.vendor_id IS NOT NULL))`,
+      [vId]
+    );
+    const variants = variantsRes.rows;
+    let updated = 0;
+    let lastVendorId = null;
+    let marginConfig = null;
+    for (const v of variants) {
+      const vid = v.vendor_id;
+      if (vid !== lastVendorId) {
+        marginConfig = await getMarginSettings(client, vid);
+        lastVendorId = vid;
+      }
+      const salePrice = v.vendorsaleprice != null ? Number(v.vendorsaleprice) : null;
+      const vendorMrp = v.vendormrp != null ? Number(v.vendormrp) : null;
+      if (!salePrice || salePrice <= 0) continue;
+      const { ourPrice, ourMrp } = computeTieredPricing(salePrice, vendorMrp, marginConfig);
+      if (ourPrice == null) continue;
+      await client.query(
+        "UPDATE product_variants SET price = $1, mrp = $2, updated_at = NOW() WHERE id = $3",
+        [ourPrice, ourMrp != null ? ourMrp : ourPrice, v.id]
+      );
+      updated += 1;
+    }
+    return sendResponse(res, 200, true, "Prices updated", { updated, total: variants.length });
+  } catch (err) {
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
+
 async function getCategoryWithParents(client, categoryId) {
   const query = `
         WITH RECURSIVE category_hierarchy AS (
@@ -2052,7 +2714,7 @@ module.exports.getMappedProducts = catchAsync(async (req, res, next) => {
 
 module.exports.unmapProduct = catchAsync(async (req, res, next) => {
   const client = await dbPool.connect();
-  const { product_id, our_category_id } = req.query;
+  const { product_id, our_category_id } = { ...req.query, ...req.body };
 
   try {
     if (!product_id || !our_category_id) {
@@ -2328,6 +2990,66 @@ module.exports.getSimilarProducts = catchAsync(async (req, res, next) => {
   } catch (err) {
     console.error("getSimilarProducts error", err);
     return next(new AppError("Internal server error", 500));
+  } finally {
+    client.release();
+  }
+});
+
+// ===============================================
+// CUSTOM DUTIES (per currency for frontend display)
+// ===============================================
+
+const CUSTOM_DUTY_CURRENCIES = ["AED", "SAR", "QAR", "KWD", "OMR", "BHD", "INR", "PKR"];
+
+module.exports.getCustomDuties = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT currency_code, duty_percent, updated_at FROM custom_duties ORDER BY currency_code`
+    );
+    const duties = {};
+    rows.forEach((r) => {
+      duties[r.currency_code] = Number(r.duty_percent) || 0;
+    });
+    // Ensure all operating currencies have a key (default 0)
+    CUSTOM_DUTY_CURRENCIES.forEach((code) => {
+      if (!(code in duties)) duties[code] = 0;
+    });
+    return sendResponse(res, 200, true, "Custom duties", duties);
+  } finally {
+    client.release();
+  }
+});
+
+module.exports.updateCustomDuties = catchAsync(async (req, res, next) => {
+  const client = await dbPool.connect();
+  try {
+    const duties = req.body.duties;
+    if (!duties || typeof duties !== "object") {
+      return next(new AppError("duties object is required", 400));
+    }
+    for (const code of Object.keys(duties)) {
+      if (!CUSTOM_DUTY_CURRENCIES.includes(code)) continue;
+      const pct = Number(duties[code]);
+      const value = Number.isNaN(pct) || pct < 0 ? 0 : Math.min(100, pct);
+      await client.query(
+        `INSERT INTO custom_duties (currency_code, duty_percent, updated_at)
+         VALUES ($1, $2, now())
+         ON CONFLICT (currency_code) DO UPDATE SET duty_percent = $2, updated_at = now()`,
+        [code, value]
+      );
+    }
+    const { rows } = await client.query(
+      `SELECT currency_code, duty_percent FROM custom_duties ORDER BY currency_code`
+    );
+    const result = {};
+    rows.forEach((r) => {
+      result[r.currency_code] = Number(r.duty_percent) || 0;
+    });
+    CUSTOM_DUTY_CURRENCIES.forEach((code) => {
+      if (!(code in result)) result[code] = 0;
+    });
+    return sendResponse(res, 200, true, "Custom duties updated", result);
   } finally {
     client.release();
   }

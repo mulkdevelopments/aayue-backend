@@ -80,6 +80,13 @@ module.exports.syncIndividualPeppelaProduct = catchAsync(async (req, res, next) 
         skipped: true,
       });
     }
+    if (require("../kidsProductFilter").isKidsProduct(transformed.product)) {
+      return sendResponse(res, 200, true, "Product skipped (kids product not imported)", {
+        productId: productId || null,
+        vendorProductId: peppelaProductId,
+        skipped: true,
+      });
+    }
     console.log("💾 Upserting Peppela product", {
       peppelaProductId,
       productSku: transformed.product.product_sku,

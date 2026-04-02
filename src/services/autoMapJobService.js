@@ -1,30 +1,25 @@
 const dbPool = require("../db/dbConnection");
 const { randomUUID } = require("crypto");
 const CategoryService = require("./categoryService");
-const ProductService = require("./productService");
-const { getAICategorySuggestions } = require("./aiCategorySuggestionService");
+const {
+  runAiCategoryMappingForProduct,
+  pushLog,
+} = require("./productAiCategoryMapService");
 
 const jobs = new Map();
 let activeJobId = null;
+const AGENT_ID_AUTO_MAPPING = "auto_mapping";
 
-const MAX_LOGS = 200;
 const DEFAULT_BATCH_SIZE = 100;
 const DEFAULT_CONCURRENCY = 3;
-
-const pushLog = (job, entry) => {
-  job.logs.push({
-    time: new Date().toISOString(),
-    ...entry,
-  });
-  if (job.logs.length > MAX_LOGS) {
-    job.logs.splice(0, job.logs.length - MAX_LOGS);
-  }
-};
 
 const buildUnmappedWhere = () => {
   return `
     p.deleted_at IS NULL
+    AND p.is_active = TRUE
     AND p.vendor_id IS NOT NULL
+    AND p.our_description IS NOT NULL
+    AND TRIM(p.our_description) <> ''
     AND EXISTS (
       SELECT 1 FROM vendors v
       WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL
@@ -60,21 +55,6 @@ const countUnmapped = async () => {
   return rows[0]?.total || 0;
 };
 
-const mapProductToCategory = async (productId, categoryId) => {
-  const existing = await dbPool.query(
-    "SELECT id FROM product_our_category_map WHERE product_id=$1 AND our_category_id=$2",
-    [productId, categoryId]
-  );
-  if (existing.rowCount > 0) return false;
-
-  await dbPool.query(
-    `INSERT INTO product_our_category_map (id, product_id, our_category_id)
-     VALUES (gen_random_uuid(), $1, $2)`,
-    [productId, categoryId]
-  );
-  return true;
-};
-
 const runWithConcurrency = async (items, limit, handler, shouldStop) => {
   let index = 0;
   const workers = Array.from({ length: limit }, async () => {
@@ -102,6 +82,13 @@ const runJob = async (jobId) => {
 
     job.total = await countUnmapped();
 
+    await dbPool.query(
+      `INSERT INTO agent_jobs (id, agent_id, status, total, processed, success, failed, started_at, updated_at)
+       VALUES ($1, $2, 'running', $3, 0, 0, 0, NOW(), NOW())
+       ON CONFLICT (id) DO UPDATE SET status = 'running', total = $3, started_at = NOW(), updated_at = NOW()`,
+      [jobId, AGENT_ID_AUTO_MAPPING, job.total]
+    );
+
     while (!job.stopRequested) {
       const batch = await fetchUnmappedBatch(job.batchSize);
       if (batch.length === 0) break;
@@ -111,102 +98,13 @@ const runJob = async (jobId) => {
         job.concurrency,
         async (productRow) => {
           if (job.stopRequested) return;
-          const productId = productRow.id;
-          try {
-            const productClient = await dbPool.connect();
-            const product = await ProductService.getProductByIdAdmin(
-              productId,
-              productClient
-            );
-            productClient.release();
-
-            if (!product) {
-              job.failed += 1;
-              job.processed += 1;
-              pushLog(job, {
-                status: "failed",
-                product_id: productId,
-                product_name: productRow.name,
-                message: "Product not found",
-              });
-              return;
-            }
-
-            const vendorCategory =
-              (product.categories || []).find((c) => c.is_our_category !== true) ||
-              (product.categories || [])[0] ||
-              null;
-            if (vendorCategory) {
-              product.vendor_category_name = vendorCategory.name || "";
-              product.vendor_category_path = vendorCategory.path || "";
-            }
-
-            const suggestions = await getAICategorySuggestions(product, categories);
-            const top = Array.isArray(suggestions) && suggestions.length > 0
-              ? [...suggestions].sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0]
-              : null;
-            if (!top?.category_id) {
-              job.failed += 1;
-              job.processed += 1;
-              pushLog(job, {
-                status: "failed",
-                product_id: productId,
-                product_name: productRow.name,
-                message: "No suggestions returned",
-              });
-              return;
-            }
-
-            const parsedAttributes =
-              typeof product.attributes === "string"
-                ? JSON.parse(product.attributes || "{}")
-                : product.attributes || {};
-            const parsedMeta =
-              typeof product.product_meta === "string"
-                ? JSON.parse(product.product_meta || "{}")
-                : product.product_meta || {};
-            const productGender = (
-              product.gender ||
-              parsedAttributes?.gender ||
-              parsedMeta?.product_feature_map?.gender ||
-              parsedMeta?.gender ||
-              ""
-            ).toLowerCase();
-            if (productGender === "unisex") {
-              const women = suggestions.find((s) => (s.category_path || "").toLowerCase().startsWith("womenswear"));
-              const men = suggestions.find((s) => (s.category_path || "").toLowerCase().startsWith("menswear"));
-              const toMap = [women, men, top].filter(Boolean);
-              const uniqueIds = [...new Set(toMap.map((s) => s.category_id))];
-              for (const cid of uniqueIds) {
-                await mapProductToCategory(productId, cid);
-              }
-            } else {
-              await mapProductToCategory(productId, top.category_id);
-            }
-
-            job.success += 1;
-            job.processed += 1;
-            pushLog(job, {
-              status: "success",
-              product_id: productId,
-              product_name: productRow.name,
-              category_path: top.category_path || top.category_name,
-              message: "Mapped successfully",
-            });
-          } catch (err) {
-            job.failed += 1;
-            job.processed += 1;
-            pushLog(job, {
-              status: "failed",
-              product_id: productId,
-              product_name: productRow.name,
-              message: err.message || "Mapping failed",
-            });
-          } finally {
-            job.updatedAt = new Date().toISOString();
-          }
+          await runAiCategoryMappingForProduct(productRow, categories, job, {});
         },
         () => job.stopRequested
+      );
+      await dbPool.query(
+        `UPDATE agent_jobs SET processed = $2, success = $3, failed = $4, updated_at = NOW() WHERE id = $1`,
+        [jobId, job.processed, job.success, job.failed]
       );
     }
 
@@ -220,10 +118,21 @@ const runJob = async (jobId) => {
   } finally {
     job.updatedAt = new Date().toISOString();
     activeJobId = job.status === "running" ? jobId : null;
+    await dbPool
+      .query(
+        `UPDATE agent_jobs SET status = $2, processed = $3, success = $4, failed = $5, updated_at = NOW(), completed_at = NOW(), stop_reason = $6 WHERE id = $1`,
+        [jobId, job.status, job.processed, job.success, job.failed, job.stopReason || null]
+      )
+      .catch((err) => console.error("agent_jobs update on finish:", err));
   }
 };
 
 const createJob = (opts = {}) => {
+  const RemapCategoryJobService = require("./remapCategoryJobService");
+  if (RemapCategoryJobService.getActiveJob()) {
+    throw new Error("Category remap is running; stop it before starting auto-map.");
+  }
+
   const id = randomUUID();
   const job = {
     id,
@@ -236,6 +145,7 @@ const createJob = (opts = {}) => {
     concurrency: opts.concurrency || DEFAULT_CONCURRENCY,
     logs: [],
     stopRequested: false,
+    stopReason: null,
     startedAt: null,
     updatedAt: new Date().toISOString(),
   };
@@ -263,9 +173,29 @@ const stopJob = (jobId) => {
   return job;
 };
 
+const getRecentJobs = async (agentId) => {
+  const { rows } = await dbPool.query(
+    `SELECT id, status, total, processed, success, failed, started_at AS "startedAt", updated_at AS "updatedAt", stop_reason AS "stopReason"
+     FROM agent_jobs WHERE agent_id = $1 ORDER BY started_at DESC NULLS LAST LIMIT 5`,
+    [agentId || AGENT_ID_AUTO_MAPPING]
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    status: r.status,
+    total: r.total,
+    processed: r.processed,
+    success: r.success,
+    failed: r.failed,
+    startedAt: r.startedAt,
+    updatedAt: r.updatedAt,
+    stopReason: r.stopReason || null,
+  }));
+};
+
 module.exports = {
   createJob,
   getJob,
   getActiveJob,
   stopJob,
+  getRecentJobs,
 };

@@ -121,6 +121,10 @@ router.get(
   "/get-brand-groups",
   indexCtrl.userBrandGroupController.getActiveBrandGroups
 );
+router.get(
+  "/get-brand-highlights",
+  indexCtrl.userBrandHighlightController.getActiveBrandHighlights
+);
 
 /**================== New Arrival Routes ================== */
 
@@ -134,6 +138,10 @@ router.get(
 router.get(
   "/get-home-sections",
   indexCtrl.userSectionController.getActiveSections
+);
+router.get(
+  "/get-hero-slides",
+  indexCtrl.userHeroSlideController.getActiveHeroSlides
 );
 
 /**================== Sales Routes ================== */
@@ -181,6 +189,16 @@ router.get(
   "/get-order-by-id",
   protectUser,
   indexCtrl.userOrderController.getUserOrderById
+);
+router.post(
+  "/cancel-order",
+  protectUser,
+  indexCtrl.userOrderController.cancelOrderByCustomer
+);
+router.get(
+  "/shipment-tracking-timeline",
+  protectUser,
+  indexCtrl.userOrderController.getShipmentTrackingTimeline
 );
 
 router.post("/apply-coupon", indexCtrl.couponController.applyCoupon);
@@ -270,5 +288,8 @@ router.get("/get-policies", indexCtrl.policyController.getPolicy);
 /**=================== About Us Routes ================== */
 
 router.get('/get-about-us', indexCtrl.aboutUsController.getAboutUs);
+
+/**=================== Page Content (FAQ, How to Shop) ================== */
+router.get('/get-page-content', indexCtrl.pageContentController.getPageContentPublic);
 
 module.exports = router;

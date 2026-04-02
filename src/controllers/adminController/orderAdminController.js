@@ -8,6 +8,7 @@ const { isValidUUID } = require("../../utils/basicValidation");
 const { randomUUID } = require("crypto");
 const nodemailer = require("nodemailer");
 const { sendOrderStatusEmail } = require("../../utils/sendMail");
+const { getCustomDutyForCurrency } = require("../../utils/customDutyHelper");
 const { UserServices } = require("../../services/userServices");
 const Stripe = require("stripe");
 const OrderService = require("../../services/orderService");
@@ -215,6 +216,9 @@ module.exports.updateOrderStatus = catchAsync(async (req, res, next) => {
     o.payment_status,
     o.billing_address,
     o.shipping_address,
+    o.currency,
+    o.exchange_rate,
+    o.currency_symbol,
     pv.sku,
     pv.normalized_size AS size,
     u.full_name,
@@ -231,13 +235,17 @@ module.exports.updateOrderStatus = catchAsync(async (req, res, next) => {
 
     orderItems = [...rows];
 
-    console.log("Order items for email:", orderItems);
+    const orderCurrency = orderItems[0]?.currency || "AED";
+    const dutyPercent = await getCustomDutyForCurrency(client, orderCurrency);
 
     sendOrderStatusEmail(orderItems[0].email, {
       customerName: orderItems[0].full_name,
       orderId: orderItems[0].order_no,
       items: orderItems,
       status: order_status,
+      currency: orderItems[0]?.currency_symbol || "€",
+      exchange_rate: orderItems[0]?.exchange_rate != null ? Number(orderItems[0].exchange_rate) : 1,
+      duty_percent: dutyPercent,
     });
 
     await client.query("BEGIN");
@@ -342,6 +350,74 @@ module.exports.verifyOrderPayment = catchAsync(async (req, res, next) => {
       );
     }
 
+    // PaymentIntent stays "succeeded" after a full refund — do not re-finalize as paid.
+    const paymentIntentForRefund =
+      sessionIdToUse && typeof session?.payment_intent === "object"
+        ? session.payment_intent
+        : stripePaymentId
+        ? await stripe.paymentIntents.retrieve(stripePaymentId)
+        : null;
+
+    if (orderId && paymentIntentForRefund?.id) {
+      const received =
+        typeof paymentIntentForRefund.amount_received === "number"
+          ? paymentIntentForRefund.amount_received
+          : paymentIntentForRefund.amount || 0;
+      const refundList = await stripe.refunds.list({
+        payment_intent: paymentIntentForRefund.id,
+        limit: 100,
+      });
+      const refundedCents = refundList.data
+        .filter((r) => r.status === "succeeded")
+        .reduce((s, r) => s + (r.amount || 0), 0);
+      const fullyRefunded = received > 0 && refundedCents >= received;
+
+      if (fullyRefunded) {
+        let lastOrderRow = null;
+        await client.query("BEGIN");
+        try {
+          await client.query(
+            `UPDATE payments SET status = 'refunded' WHERE order_id = $1`,
+            [orderId]
+          );
+          const { rows: oRows } = await client.query(
+            `SELECT order_status, payment_status FROM orders WHERE id = $1 FOR UPDATE`,
+            [orderId]
+          );
+          lastOrderRow = oRows[0] || null;
+          if (
+            lastOrderRow &&
+            String(lastOrderRow.order_status || "").toLowerCase() ===
+              "cancelled"
+          ) {
+            await client.query(
+              `UPDATE orders SET payment_status = 'refund_completed', deleted_at = NULL WHERE id = $1`,
+              [orderId]
+            );
+          }
+          await client.query("COMMIT");
+        } catch (e) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw e;
+        }
+        const msg =
+          lastOrderRow &&
+          String(lastOrderRow.order_status || "").toLowerCase() === "cancelled"
+            ? "Stripe confirms full refund. Order remains cancelled with refund completed."
+            : "Stripe shows this payment was fully refunded. Payment record updated.";
+        return sendResponse(res, 200, true, msg, {
+          order_id: orderId,
+          payment_status:
+            lastOrderRow &&
+            String(lastOrderRow.order_status || "").toLowerCase() ===
+              "cancelled"
+              ? "refund_completed"
+              : lastOrderRow?.payment_status,
+          refunded_in_stripe: true,
+        });
+      }
+    }
+
     await client.query("BEGIN");
 
     try {
@@ -350,7 +426,7 @@ module.exports.verifyOrderPayment = catchAsync(async (req, res, next) => {
           ? session.payment_intent
           : payment_intent
           ? await stripe.paymentIntents.retrieve(payment_intent)
-          : null;
+          : paymentIntentForRefund;
 
       const charge = paymentIntentObj?.charges?.data?.[0];
       const chargeId = charge?.id || paymentIntentObj?.latest_charge || null;

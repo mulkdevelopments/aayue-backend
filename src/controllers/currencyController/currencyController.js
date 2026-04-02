@@ -11,20 +11,27 @@ exports.getExchangeRates = async (req, res, next) => {
     const client = await dbPool.connect();
 
     try {
-      const result = await client.query(`
-        SELECT
-          from_currency,
-          to_currency,
-          rate,
-          updated_at
+      const ratesResult = await client.query(`
+        SELECT from_currency, to_currency, rate, updated_at
         FROM currency_exchange_rates
         WHERE from_currency = 'EUR'
         ORDER BY to_currency
-      `); 
+      `);
 
-      // Format response as { EUR: 1, AED: rate, INR: rate, PKR: rate }
-      const rates = { EUR: 1 }; // EUR to EUR is always 1
-      result.rows.forEach(row => {
+      let duties = {};
+      try {
+        const dutiesResult = await client.query(
+          `SELECT currency_code, duty_percent FROM custom_duties ORDER BY currency_code`
+        );
+        dutiesResult.rows.forEach(row => {
+          duties[row.currency_code] = parseFloat(row.duty_percent) || 0;
+        });
+      } catch (dutyErr) {
+        // custom_duties table may not exist before migration
+      }
+
+      const rates = { EUR: 1 };
+      ratesResult.rows.forEach(row => {
         rates[row.to_currency] = parseFloat(row.rate);
       });
 
@@ -33,7 +40,8 @@ exports.getExchangeRates = async (req, res, next) => {
         data: {
           base: 'EUR',
           rates,
-          updated_at: result.rows[0]?.updated_at || null
+          duties,
+          updated_at: ratesResult.rows[0]?.updated_at || null
         }
       });
 

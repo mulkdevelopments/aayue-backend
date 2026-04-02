@@ -56,6 +56,15 @@ const protectAdmin = async (req, res, next) => {
     } catch (err) {
         return next(new AppError(err.message, 401));
     }
-}
+};
 
-module.exports = { protectUser, protectAdmin };
+/** Must be used after protectAdmin. Restricts access to superadmin only (e.g. admin management). */
+const requireSuperadmin = (req, res, next) => {
+    if (!req.admin) return next(new AppError("Not authorized", 401));
+    if (req.admin.role !== "superadmin") {
+        return next(new AppError("Forbidden: superadmin only", 403));
+    }
+    next();
+};
+
+module.exports = { protectUser, protectAdmin, requireSuperadmin };

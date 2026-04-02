@@ -11,7 +11,9 @@ module.exports.generateInvoiceHTML = function (data) {
     shipping,
     grandTotal,
     paymentStatus,
+    currency_symbol = "€",
   } = data;
+  const sym = currency_symbol || "€";
 
   const barcodeImage = generateBarcode(orderId);
   console.log(customer.address, "customer address");
@@ -162,10 +164,10 @@ module.exports.generateInvoiceHTML = function (data) {
             <td class="border border-gray-300 px-3 py-3 text-center">${
               item.size || "-"
             }</td>
-            <td class="border border-gray-300 px-3 py-3 text-right">AED ${
+            <td class="border border-gray-300 px-3 py-3 text-right">${sym} ${
               item.unitPrice
             }</td>
-            <td class="border border-gray-300 px-3 py-3 text-right font-bold">AED ${
+            <td class="border border-gray-300 px-3 py-3 text-right font-bold">${sym} ${
               item.total
             }</td>
           </tr>
@@ -179,15 +181,15 @@ module.exports.generateInvoiceHTML = function (data) {
     <div class="float-right w-72 mt-6 text-sm">
       <div class="flex justify-between py-1">
         <span>Cart Subtotal</span>
-        <span class="font-bold">AED ${subtotal}</span>
+        <span class="font-bold">${sym} ${subtotal}</span>
       </div>
       <div class="flex justify-between py-1">
         <span>Shipping</span>
-        <span>${shipping}</span>
+        <span>${sym} ${shipping}</span>
       </div>
       <div class="flex justify-between py-1 border-t border-gray-300 pt-3 mt-3 font-bold text-base">
         <span>Grand Total</span>
-        <span>AED ${grandTotal}</span>
+        <span>${sym} ${grandTotal}</span>
       </div>
       <div class="text-right text-red-600 text-3xl font-bold mt-4">${
         paymentStatus ? (paymentStatus == "paid" ? "PAID" : "PENDING") : ""

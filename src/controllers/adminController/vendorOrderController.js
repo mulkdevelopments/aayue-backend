@@ -8,6 +8,7 @@ const dbPool = require('../../db/dbConnection');
 const catchAsync = require('../../errorHandling/catchAsync');
 const sendResponse = require('../../utils/sendResponse');
 const { VendorOrderManager } = require('../../services/vendorOrders');
+const { fetchCarrierTimeline } = require('../../services/carrierTracking17Service');
 
 /**
  * Get vendor orders summary
@@ -174,6 +175,17 @@ exports.syncOrderTracking = catchAsync(async (req, res, next) => {
 });
 
 /**
+ * Carrier shipment timeline (17TRACK). Query: number, carrier (optional).
+ * GET /admin/tracking-timeline?number=...&carrier=FedEx
+ * Env: SEVENTEEN_TRACK_API_KEY
+ */
+exports.getCarrierTrackingTimeline = catchAsync(async (req, res) => {
+  const { number, carrier } = req.query;
+  const result = await fetchCarrierTimeline(number, carrier);
+  return sendResponse(res, 200, true, 'Carrier timeline', result);
+});
+
+/**
  * Get order details with vendor placement status
  * GET /admin/vendor-orders/:orderId/details
  */
@@ -244,4 +256,68 @@ exports.manualPlaceOrder = catchAsync(async (req, res, next) => {
     message: 'Vendor order placement completed',
     result
   });
+});
+
+/**
+ * Mark vendor items as paid (after paying on merchant dashboard)
+ * POST /admin/vendor-orders/:orderId/mark-paid
+ * Body: { vendorId: string } - required, vendor UUID
+ */
+exports.markVendorPaid = catchAsync(async (req, res, next) => {
+  const { orderId } = req.params;
+  const { vendorId } = req.body;
+
+  if (!vendorId) {
+    return sendResponse(res, 400, false, 'vendorId is required');
+  }
+
+  const client = await dbPool.connect();
+  try {
+    const updateResult = await client.query(`
+      UPDATE order_items oi
+      SET vendor_paid_at = NOW(), updated_at = NOW()
+      FROM product_variants pv
+      JOIN products p ON p.id = pv.product_id AND p.deleted_at IS NULL
+      WHERE oi.order_id = $1 AND oi.variant_id = pv.id AND p.vendor_id = $2
+        AND oi.deleted_at IS NULL
+      RETURNING oi.id
+    `, [orderId, vendorId]);
+
+    const updatedCount = updateResult.rowCount || 0;
+    sendResponse(res, 200, true, `Marked ${updatedCount} item(s) as paid with vendor`, { updatedCount });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * Unmark vendor items as paid (revert accidental mark)
+ * POST /admin/vendor-orders/:orderId/unmark-paid
+ * Body: { vendorId: string } - required, vendor UUID
+ */
+exports.unmarkVendorPaid = catchAsync(async (req, res, next) => {
+  const { orderId } = req.params;
+  const { vendorId } = req.body;
+
+  if (!vendorId) {
+    return sendResponse(res, 400, false, 'vendorId is required');
+  }
+
+  const client = await dbPool.connect();
+  try {
+    const updateResult = await client.query(`
+      UPDATE order_items oi
+      SET vendor_paid_at = NULL, updated_at = NOW()
+      FROM product_variants pv
+      JOIN products p ON p.id = pv.product_id AND p.deleted_at IS NULL
+      WHERE oi.order_id = $1 AND oi.variant_id = pv.id AND p.vendor_id = $2
+        AND oi.deleted_at IS NULL
+      RETURNING oi.id
+    `, [orderId, vendorId]);
+
+    const updatedCount = updateResult.rowCount || 0;
+    sendResponse(res, 200, true, `Reverted paid status for ${updatedCount} item(s)`, { updatedCount });
+  } finally {
+    client.release();
+  }
 });

@@ -12,6 +12,7 @@ const { normalizeBrandName } = require("../../../utils/normalize");
 // dotenv.config();
 
 const { getLuxuryToken, getLuxuryProduct } = require("./luxuryHelper"); // 👈 path adjust karna agar alag ho
+const { getMarginSettings, computeTieredPricing } = require("../../../utils/marginHelper");
 
 const logger = pino({ level: process.env.IMPORT_LOG_LEVEL || "info" });
 
@@ -331,12 +332,12 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       console.log("⚠️  No category path for this product");
     }
 
-    // find existing product ONLY by product_sku (as you asked)
+    // find existing product by product_sku and vendor
     let existing = null;
     if (product.product_sku) {
       const res = await client.query(
-        "SELECT id, default_category_id FROM products WHERE product_sku = $1 AND deleted_at IS NULL",
-        [product.product_sku]
+        "SELECT id, default_category_id, manually_edited_at FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1",
+        [product.product_sku, LUXURY_VENDOR_ID]
       );
       if (res.rowCount) {
         existing = res.rows[0];
@@ -346,7 +347,30 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       }
     }
 
-    let productId = existing ? existing.id : randomUUID();
+    if (existing && existing.manually_edited_at) {
+      console.log(`   ⏭️  Skipped (manually edited)`);
+      return { skipped: "manually_edited" };
+    }
+
+    const { checkAndMarkSuspiciousIfNeeded } = require("../competitorCheck");
+    const suspicious = await checkAndMarkSuspiciousIfNeeded(client, product, existing?.id);
+    if (suspicious) {
+      console.log(`   ⏭️  Skipped (suspicious: ${suspicious.reason || "competitor"})`);
+      return { skipped: "suspicious" };
+    }
+
+    let productId = existing ? existing.id : null;
+    if (!productId && product.product_sku) {
+      const deleted = await client.query(
+        "SELECT id FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NOT NULL LIMIT 1",
+        [product.product_sku, LUXURY_VENDOR_ID]
+      );
+      if (deleted.rowCount) {
+        console.log(`   ⏭️  Skipped (product was deleted)`);
+        return { skipped: "deleted" };
+      }
+    }
+    if (!productId) productId = randomUUID();
 
     if (existing) {
       // Check if product has "our category" mapping
@@ -481,31 +505,12 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
       const rawVendorMrp = v.vendormrp ?? null;
       const rawVendorSale = v.vendorsaleprice ?? v.price ?? null;
 
-      // Tiered markup pricing: >1000 → 28%, 501–1000 → 37%, else 45%
-      let ourPrice = null;
-      let ourMrp = null;
-
-      if (rawVendorSale && Number(rawVendorSale) > 0) {
-        let markupPercentage;
-        const salePrice = Number(rawVendorSale);
-
-        if (salePrice > 1000) {
-          markupPercentage = 0.28;
-        } else if (salePrice >= 501) {
-          markupPercentage = 0.37;
-        } else {
-          markupPercentage = 0.45;
-        }
-
-        ourPrice = Math.round(salePrice * (1 + markupPercentage));
-
-        if (rawVendorMrp && Number(rawVendorMrp) > salePrice) {
-          const vendorDiscount = (Number(rawVendorMrp) - salePrice) / Number(rawVendorMrp);
-          ourMrp = Math.round(ourPrice / (1 - vendorDiscount));
-        } else {
-          ourMrp = ourPrice;
-        }
-      }
+      const marginConfig = opts.marginConfig || null;
+      const { ourPrice, ourMrp } = computeTieredPricing(
+        rawVendorSale && Number(rawVendorSale) > 0 ? Number(rawVendorSale) : null,
+        rawVendorMrp ? Number(rawVendorMrp) : null,
+        marginConfig
+      );
 
       console.log(`         💰 Price: Vendor EUR ${rawVendorSale} → Our EUR ${ourPrice} | Vendor MRP EUR ${rawVendorMrp} → Our MRP EUR ${ourMrp}`);
 
@@ -827,6 +832,8 @@ async function syncLuxuryProducts(jobId) {
   console.log("🔑 Authentication token obtained successfully\n");
   const client = await dbPool.connect();
 
+  const marginConfig = await getMarginSettings(client, LUXURY_VENDOR_ID);
+
   try {
     logger.info("🚀 Starting Luxury Distribution product sync...");
 
@@ -892,7 +899,11 @@ async function syncLuxuryProducts(jobId) {
           if (require("../excludedBrands").isBrandExcluded(transformed.product?.brand_name)) {
             continue;
           }
-          await upsertProductAndVariant(client, transformed, {});
+          if (require("../kidsProductFilter").isKidsProduct(transformed.product)) {
+            continue;
+          }
+          const result = await upsertProductAndVariant(client, transformed, { marginConfig });
+          if (result && result.skipped) continue;
           // Track synced product SKU
           if (transformed.product.product_sku) {
             syncedProductSkus.add(transformed.product.product_sku);

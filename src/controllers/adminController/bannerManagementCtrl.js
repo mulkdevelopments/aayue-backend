@@ -19,6 +19,7 @@ const VALID_SLOTS = [
   "middle-banner",
   "bottom-top-banner",
   "bottom-left-banner",
+  "bottom-right-banner",
 ];
 
 /**
@@ -188,8 +189,23 @@ exports.upsertHomeBanners = catchAsync(async (req, res, next) => {
     `;
 
     const updatedSlots = [];
+    const cloudinaryUrlsToRemove = [];
 
     for (const b of normalized) {
+      const { rows: existingRows } = await client.query(
+        "SELECT media_url FROM home_banners WHERE slot = $1",
+        [b.slot]
+      );
+      const previousUrl = existingRows[0]?.media_url;
+      if (
+        previousUrl &&
+        b.media_url &&
+        previousUrl !== b.media_url &&
+        String(previousUrl).includes("cloudinary.com")
+      ) {
+        cloudinaryUrlsToRemove.push(previousUrl);
+      }
+
       const id = randomUUID();
       const values = [
         id, // $1 id
@@ -211,6 +227,17 @@ exports.upsertHomeBanners = catchAsync(async (req, res, next) => {
 
     await client.query("COMMIT");
 
+    for (const url of cloudinaryUrlsToRemove) {
+      try {
+        await deleteCloudinaryAsset(url);
+      } catch (e) {
+        console.warn(
+          "Failed to delete replaced banner from Cloudinary:",
+          e.message || e
+        );
+      }
+    }
+
     return sendResponse(res, 200, true, "Home banners updated successfully", {
       updatedSlots,
     });
@@ -218,6 +245,52 @@ exports.upsertHomeBanners = catchAsync(async (req, res, next) => {
     await client.query("ROLLBACK").catch(() => {});
     return next(
       new AppError(err.message || "Failed to update home banners", 500)
+    );
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * DELETE /admin/delete-home-banner?slot=bottom-left-banner
+ * Removes the row and deletes the image from Cloudinary when applicable.
+ */
+exports.deleteHomeBannerSlot = catchAsync(async (req, res, next) => {
+  const slot = String(req.query.slot || "").trim();
+  if (!VALID_SLOTS.includes(slot)) {
+    return next(new AppError(`Invalid or unsupported slot: ${slot}`, 400));
+  }
+
+  const client = await dbPool.connect();
+  try {
+    const { rows } = await client.query(
+      "SELECT media_url FROM home_banners WHERE slot = $1",
+      [slot]
+    );
+    if (rows.length === 0) {
+      return sendResponse(res, 200, true, "No banner configured for this slot", {
+        slot,
+      });
+    }
+
+    const mediaUrl = rows[0].media_url;
+    await client.query("DELETE FROM home_banners WHERE slot = $1", [slot]);
+
+    if (mediaUrl && String(mediaUrl).includes("cloudinary.com")) {
+      try {
+        await deleteCloudinaryAsset(mediaUrl);
+      } catch (e) {
+        console.warn(
+          "Failed to delete banner image from Cloudinary:",
+          e.message || e
+        );
+      }
+    }
+
+    return sendResponse(res, 200, true, "Home banner removed", { slot });
+  } catch (err) {
+    return next(
+      new AppError(err.message || "Failed to delete home banner", 500)
     );
   } finally {
     client.release();

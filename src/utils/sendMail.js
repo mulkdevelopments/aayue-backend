@@ -24,12 +24,14 @@ const transporter = nodemailer.createTransport({
 });
 
 const sendOrderConfirmation = async (to, orderData) => {
-  const { customerName, orderId, items, payment_id } = orderData;
+  const { customerName, orderId, items, payment_id, currency, duty_percent } = orderData;
 
   const html = generateOrderConfirmationEmail({
     customerName,
     orderId,
     items,
+    currency: currency || "€",
+    duty_percent: duty_percent != null ? Number(duty_percent) : 0,
   });
 
   const mailOptions = {
@@ -156,13 +158,15 @@ ${company} Support Team`;
 }
 
 const sendOrderStatusEmail = async (to, orderData) => {
-  let { customerName, orderId, items, status } = orderData;
+  let { customerName, orderId, items, status, currency, duty_percent } = orderData;
 
   const html = generateOrderStatusEmail({
     customerName,
     orderId,
     items,
     status,
+    currency: currency || "€",
+    duty_percent: duty_percent != null ? Number(duty_percent) : 0,
   });
   const mailOptions = {
     from: `"${process.env.EMAIL_SENDER_NAME || 'Aayeu'}" <${process.env.EMAIL_FROM || 'no-reply@aayeu.com'}>`,
@@ -185,6 +189,7 @@ const sendNewOrderNotificationEmail = async (toList, orderData) => {
     currencySymbol = "€",
     customerEmail,
     customerPhone,
+    duty_percent,
   } = orderData;
 
   const html = generateAdminNewOrderEmail({
@@ -195,6 +200,7 @@ const sendNewOrderNotificationEmail = async (toList, orderData) => {
     items,
     total,
     currency: currencySymbol || currency,
+    duty_percent: duty_percent != null ? Number(duty_percent) : 0,
   });
 
   const mailOptions = {

@@ -15,6 +15,7 @@ const {
 } = require("./peppelaHelper");
 const { toJsonb, slugify } = require("../../../../importHelpers");
 const { normalizeBrandName } = require("../../../utils/normalize");
+const { getMarginSettings, computeTieredPricing } = require("../../../utils/marginHelper");
 
 const logger = pino({ level: process.env.IMPORT_LOG_LEVEL || "info" });
 
@@ -25,33 +26,6 @@ const categoryCache = new Map();
 const featureCache = new Map();
 const featureValueCache = new Map();
 let pLimitFn = null;
-
-function computeTieredPricing(vendorSalePrice, vendorMrp) {
-  const salePrice = vendorSalePrice != null ? Number(vendorSalePrice) : null;
-  const mrpPrice = vendorMrp != null ? Number(vendorMrp) : null;
-  if (!salePrice || Number.isNaN(salePrice) || salePrice <= 0) {
-    return { ourPrice: null, ourMrp: null };
-  }
-
-  let markupPercentage;
-  if (salePrice > 1000) {
-    markupPercentage = 0.28;
-  } else if (salePrice >= 501) {
-    markupPercentage = 0.37;
-  } else {
-    markupPercentage = 0.45;
-  }
-
-  const ourPrice = Math.round(salePrice * (1 + markupPercentage));
-
-  let ourMrp = ourPrice;
-  if (mrpPrice && Number(mrpPrice) > salePrice) {
-    const vendorDiscount = (Number(mrpPrice) - salePrice) / Number(mrpPrice);
-    ourMrp = Math.round(ourPrice / (1 - vendorDiscount));
-  }
-
-  return { ourPrice, ourMrp };
-}
 
 async function getPLimit() {
   if (pLimitFn) return pLimitFn;
@@ -236,7 +210,7 @@ async function ensureCategoryPath(client, categoryPath) {
   return parentId;
 }
 
-async function transformPeppelaProduct(product) {
+async function transformPeppelaProduct(product, marginConfig) {
   const transformStart = Date.now();
   const productId = String(product.id);
   const name = normalizeName(product.name);
@@ -343,7 +317,7 @@ async function transformPeppelaProduct(product) {
     return null;
   }
   const baseVariantMrp = product.street_price ? Number(product.street_price) : null;
-  const { ourPrice, ourMrp } = computeTieredPricing(baseVariantPrice, baseVariantMrp);
+  const { ourPrice, ourMrp } = computeTieredPricing(baseVariantPrice, baseVariantMrp, marginConfig);
 
   const combinationIds = normalizeToArray(product.associations?.combinations)
     .map((combo) => combo?.id)
@@ -499,7 +473,7 @@ async function upsertProductAndVariants(client, transformed) {
     let existing = null;
     if (product.productid) {
       const res = await client.query(
-        `SELECT id, default_category_id FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        `SELECT id, default_category_id, manually_edited_at FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
         [product.productid, PEPPELA_VENDOR_ID]
       );
       if (res.rowCount) existing = res.rows[0];
@@ -507,13 +481,31 @@ async function upsertProductAndVariants(client, transformed) {
 
     if (!existing && product.product_sku) {
       const res = await client.query(
-        `SELECT id, default_category_id FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        `SELECT id, default_category_id, manually_edited_at FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
         [product.product_sku, PEPPELA_VENDOR_ID]
       );
       if (res.rowCount) existing = res.rows[0];
     }
 
-    let productId = existing ? existing.id : randomUUID();
+    if (existing && existing.manually_edited_at) {
+      return { productId: existing.id, variantCount: 0, skipped: "manually_edited" };
+    }
+
+    const { checkAndMarkSuspiciousIfNeeded } = require("../competitorCheck");
+    const suspicious = await checkAndMarkSuspiciousIfNeeded(client, product, existing?.id);
+    if (suspicious) {
+      return { productId: existing?.id ?? null, variantCount: 0, skipped: "suspicious", reason: suspicious.reason };
+    }
+
+    let productId = existing ? existing.id : null;
+    if (!productId && product.productid) {
+      const deleted = await client.query(
+        `SELECT id FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NOT NULL LIMIT 1`,
+        [product.productid, PEPPELA_VENDOR_ID]
+      );
+      if (deleted.rowCount) return { productId: null, variantCount: 0, skipped: "deleted" };
+    }
+    if (!productId) productId = randomUUID();
 
     if (existing) {
       await client.query(
@@ -976,6 +968,8 @@ async function syncPeppelaProducts(jobId) {
   const syncedProductIds = new Set();
   const client = await dbPool.connect();
 
+  const marginConfig = await getMarginSettings(client, PEPPELA_VENDOR_ID);
+
   try {
     logger.info("🚀 Starting Peppela product sync...");
 
@@ -1036,11 +1030,14 @@ async function syncPeppelaProducts(jobId) {
             );
 
             const transformStart = Date.now();
-            const transformed = await transformPeppelaProduct(product);
+            const transformed = await transformPeppelaProduct(product, marginConfig);
             if (!transformed) {
               return;
             }
             if (require("../excludedBrands").isBrandExcluded(transformed.product?.brand_name)) {
+              return;
+            }
+            if (require("../kidsProductFilter").isKidsProduct(transformed.product)) {
               return;
             }
             logger.info(
@@ -1052,7 +1049,8 @@ async function syncPeppelaProducts(jobId) {
             );
 
             const upsertStart = Date.now();
-            await upsertProductAndVariants(client, transformed);
+            const result = await upsertProductAndVariants(client, transformed);
+            if (result && result.skipped) return;
             logger.info(
               {
                 product_id: entry.id,

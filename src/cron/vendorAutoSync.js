@@ -1,6 +1,8 @@
 const cron = require("node-cron");
 const dbPool = require("../db/dbConnection");
 const { VendorSyncJobService } = require("../services/vendorSyncJobService");
+const DescriptionRewriteJobService = require("../services/descriptionRewriteJobService");
+const AutoMapJobService = require("../services/autoMapJobService");
 const luxuryImportService = require("../controllers/importController/luxuryDistibution/LuxuryApiService");
 const peppelaImportService = require("../controllers/importController/peppela/PeppelaApiService");
 const brandsgatewayImportService = require("../controllers/importController/brandsgateway/BrandsgatewayApiService");
@@ -29,7 +31,13 @@ const VENDORS = [
   },
 ];
 
-async function startVendorSync(vendor) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const AGENT_POLL_INTERVAL_MS = 15 * 1000;
+const AGENT_MAX_WAIT_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+/** Start one vendor sync and return a Promise that resolves when that sync completes (or resolves immediately if skipped). */
+async function runVendorSyncAndWait(vendor) {
   const client = await dbPool.connect();
   try {
     const vendorStatus = await client.query(
@@ -79,17 +87,14 @@ async function startVendorSync(vendor) {
     });
 
     console.log(`🌙 Auto sync started for ${vendor.name}: ${syncJob.id}`);
-
-    setImmediate(async () => {
-      try {
-        await vendor.sync(syncJob.id);
-      } catch (err) {
-        console.error(
-          `❌ Auto sync error for ${vendor.name}:`,
-          err.message || err
-        );
-      }
-    });
+    try {
+      await vendor.sync(syncJob.id);
+    } catch (err) {
+      console.error(
+        `❌ Auto sync error for ${vendor.name}:`,
+        err.message || err
+      );
+    }
   } catch (err) {
     console.error(
       `❌ Auto sync setup failed for ${vendor.name}:`,
@@ -100,10 +105,68 @@ async function startVendorSync(vendor) {
   }
 }
 
-async function runAutoSync() {
-  for (const vendor of VENDORS) {
-    await startVendorSync(vendor);
+/** Poll until the description rewrite job is no longer running (completed/failed/stopped). */
+async function waitForDescriptionJobToFinish(jobId) {
+  const start = Date.now();
+  while (Date.now() - start < AGENT_MAX_WAIT_MS) {
+    const job = DescriptionRewriteJobService.getJob(jobId);
+    if (!job || ["completed", "failed", "stopped"].includes(job.status)) {
+      return job;
+    }
+    await sleep(AGENT_POLL_INTERVAL_MS);
   }
+  return null;
+}
+
+/** Poll until the mapping job is no longer running. */
+async function waitForMappingJobToFinish(jobId) {
+  const start = Date.now();
+  while (Date.now() - start < AGENT_MAX_WAIT_MS) {
+    const job = AutoMapJobService.getJob(jobId);
+    if (!job || ["completed", "failed", "stopped"].includes(job.status)) {
+      return job;
+    }
+    await sleep(AGENT_POLL_INTERVAL_MS);
+  }
+  return null;
+}
+
+async function runAutoSync() {
+  console.log("🕒 Cron: starting vendor sync + description + mapping pipeline");
+
+  // 1) Run all vendor syncs and wait for completion
+  await Promise.all(VENDORS.map((v) => runVendorSyncAndWait(v)));
+  console.log("✅ Cron: all vendor syncs finished");
+
+  // 2) Run description agent and wait for completion
+  const activeDesc = DescriptionRewriteJobService.getActiveJob();
+  if (activeDesc) {
+    console.log(
+      `⏭️  Cron: description agent already running (${activeDesc.id}), waiting for it...`
+    );
+    await waitForDescriptionJobToFinish(activeDesc.id);
+  } else {
+    const descJob = DescriptionRewriteJobService.createJob({});
+    console.log(`📝 Cron: description agent started (${descJob.id}), waiting for completion...`);
+    await waitForDescriptionJobToFinish(descJob.id);
+    console.log("✅ Cron: description agent finished");
+  }
+
+  // 3) Run mapping agent (and wait for completion)
+  const activeMap = AutoMapJobService.getActiveJob();
+  if (activeMap) {
+    console.log(
+      `⏭️  Cron: mapping agent already running (${activeMap.id}), waiting for it...`
+    );
+    await waitForMappingJobToFinish(activeMap.id);
+  } else {
+    const mapJob = AutoMapJobService.createJob({});
+    console.log(`🗺️  Cron: mapping agent started (${mapJob.id}), waiting for completion...`);
+    await waitForMappingJobToFinish(mapJob.id);
+    console.log("✅ Cron: mapping agent finished");
+  }
+
+  console.log("🕒 Cron: pipeline complete (vendor sync → description → mapping)");
 }
 
 const cronExpression = process.env.AUTO_SYNC_CRON || "0 0 * * *";

@@ -53,8 +53,28 @@ function checkKeyFile() {
   }
 }
 
+function isPortInUse(port) {
+  try {
+    const { execSync } = require('child_process');
+    execSync(`lsof -ti :${port} 2>/dev/null`, { encoding: 'utf8' });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function startTunnel(background = false) {
   checkKeyFile();
+
+  const used = [];
+  if (isPortInUse(CONFIG.localPortPg)) used.push(CONFIG.localPortPg);
+  if (isPortInUse(CONFIG.localPortRedis)) used.push(CONFIG.localPortRedis);
+  if (isPortInUse(CONFIG.localPortEs)) used.push(CONFIG.localPortEs);
+  if (used.length) {
+    log(`\n❌ Port(s) already in use: ${used.join(', ')}`, colors.red);
+    log(`   Stop existing tunnel first. From repo root run: npm run dev:clean`, colors.yellow);
+    process.exit(1);
+  }
 
   log(`\n🔧 Starting SSH tunnels to production services...`, colors.cyan);
   log(`   PostgreSQL:     localhost:${CONFIG.localPortPg} → ${CONFIG.remoteHost}:${CONFIG.remotePortPg}`, colors.dim);

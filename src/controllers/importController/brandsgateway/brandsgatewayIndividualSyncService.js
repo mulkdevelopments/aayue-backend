@@ -67,6 +67,13 @@ module.exports.syncIndividualBrandsgatewayProduct = catchAsync(
           skipped: true,
         });
       }
+      if (require("../kidsProductFilter").isKidsProduct(transformed.product)) {
+        return sendResponse(res, 200, true, "Product skipped (kids product not imported)", {
+          productId: productId || null,
+          vendorProductId: bgProductId,
+          skipped: true,
+        });
+      }
 
       const syncResult = await upsertProductAndVariants(client, transformed);
 

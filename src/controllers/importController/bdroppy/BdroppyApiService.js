@@ -15,33 +15,11 @@ const {
   getBrands,
 } = require("./bdroppyHelper");
 const { isBrandExcluded } = require("../excludedBrands");
+const { checkAndMarkSuspiciousIfNeeded } = require("../competitorCheck");
+const { getMarginSettings, computeTieredPricing } = require("../../../utils/marginHelper");
 
 const BDROPPY_VENDOR_ID = "a6bdd96b-0e2c-4f3e-b644-4e088b1778e0";
 const PREFERRED_LOCALE = "en_US";
-
-/** Tiered margin: >1000 → 28%, 501–1000 → 37%, else 45%. Same as other API vendors. */
-function computeTieredPricing(vendorSalePrice, vendorMrp) {
-  const salePrice = vendorSalePrice != null ? Number(vendorSalePrice) : null;
-  const mrpPrice = vendorMrp != null ? Number(vendorMrp) : null;
-  if (!salePrice || Number.isNaN(salePrice) || salePrice <= 0) {
-    return { ourPrice: null, ourMrp: null };
-  }
-  let markupPercentage;
-  if (salePrice > 1000) {
-    markupPercentage = 0.28;
-  } else if (salePrice >= 501) {
-    markupPercentage = 0.37;
-  } else {
-    markupPercentage = 0.45;
-  }
-  const ourPrice = Math.round(salePrice * (1 + markupPercentage));
-  let ourMrp = ourPrice;
-  if (mrpPrice && Number(mrpPrice) > salePrice) {
-    const vendorDiscount = (Number(mrpPrice) - salePrice) / Number(mrpPrice);
-    ourMrp = Math.round(ourPrice / (1 - vendorDiscount));
-  }
-  return { ourPrice, ourMrp };
-}
 
 function toJsonb(value) {
   if (value === undefined || value === null) return null;
@@ -114,7 +92,7 @@ function getCategoryFromTags(tags) {
  * @param {Object} raw - BDroppy product from export
  * @param {string} [imgBase] - Base URL for images from export response root (pictures are relative)
  */
-function transformBdroppyProduct(raw, imgBase) {
+function transformBdroppyProduct(raw, imgBase, marginConfig) {
   if (!raw || (raw.type !== "P" && raw.type !== undefined)) return null;
 
   const productId = raw.id != null ? String(raw.id) : null;
@@ -140,7 +118,7 @@ function transformBdroppyProduct(raw, imgBase) {
       const streetPrice = m.streetPrice != null ? Number(m.streetPrice) : (raw.streetPrice != null ? Number(raw.streetPrice) : null);
       const vendorSale = sellPrice != null ? sellPrice : streetPrice;
       const vendorMrp = streetPrice;
-      const { ourPrice, ourMrp } = computeTieredPricing(vendorSale, vendorMrp);
+      const { ourPrice, ourMrp } = computeTieredPricing(vendorSale, vendorMrp, marginConfig);
 
       variants.push({
         sku,
@@ -164,7 +142,7 @@ function transformBdroppyProduct(raw, imgBase) {
     const streetPrice = raw.streetPrice != null ? Number(raw.streetPrice) : null;
     const vendorSale = sellPrice || streetPrice;
     const vendorMrp = streetPrice;
-    const { ourPrice, ourMrp } = computeTieredPricing(vendorSale, vendorMrp);
+    const { ourPrice, ourMrp } = computeTieredPricing(vendorSale, vendorMrp, marginConfig);
     variants.push({
       sku: `bdroppy_${productId}`,
       vendor_product_id: productId,
@@ -235,20 +213,42 @@ async function upsertProductAndVariants(client, transformed) {
     let existing = null;
     if (product.productid) {
       const res = await client.query(
-        `SELECT id, default_category_id FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        `SELECT id, default_category_id, manually_edited_at FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
         [product.productid, BDROPPY_VENDOR_ID]
       );
       if (res.rowCount) existing = res.rows[0];
     }
     if (!existing && product.product_sku) {
       const res = await client.query(
-        `SELECT id, default_category_id FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
+        `SELECT id, default_category_id, manually_edited_at FROM products WHERE product_sku = $1 AND vendor_id = $2 AND deleted_at IS NULL LIMIT 1`,
         [product.product_sku, BDROPPY_VENDOR_ID]
       );
       if (res.rowCount) existing = res.rows[0];
     }
 
-    let productId = existing ? existing.id : randomUUID();
+    if (existing && existing.manually_edited_at) {
+      await client.query("COMMIT");
+      return { productId: existing.id, variantCount: 0, skipped: "manually_edited" };
+    }
+
+    const suspicious = await checkAndMarkSuspiciousIfNeeded(client, product, existing?.id);
+    if (suspicious) {
+      await client.query("COMMIT");
+      return { productId: existing?.id ?? null, variantCount: 0, skipped: "suspicious", reason: suspicious.reason };
+    }
+
+    let productId = existing ? existing.id : null;
+    if (!productId && product.productid) {
+      const deleted = await client.query(
+        `SELECT id FROM products WHERE productid = $1 AND vendor_id = $2 AND deleted_at IS NOT NULL LIMIT 1`,
+        [product.productid, BDROPPY_VENDOR_ID]
+      );
+      if (deleted.rowCount) {
+        await client.query("COMMIT");
+        return { productId: null, variantCount: 0, skipped: "deleted" };
+      }
+    }
+    if (!productId) productId = randomUUID();
 
     if (existing) {
       await client.query(
@@ -455,6 +455,8 @@ async function syncBdroppyProducts(jobId) {
       console.warn("BDroppy: optional categories/brands fetch failed:", e.message);
     }
 
+    const marginConfig = await getMarginSettings(client, BDROPPY_VENDOR_ID);
+
     while (true) {
       const { items, imgBase } = await getProductsExport({
         userCatalog,
@@ -475,10 +477,12 @@ async function syncBdroppyProducts(jobId) {
       for (let i = 0; i < items.length; i++) {
         const raw = items[i];
         try {
-          const transformed = transformBdroppyProduct(raw, imgBase);
+          const transformed = transformBdroppyProduct(raw, imgBase, marginConfig);
           if (!transformed) continue;
           if (isBrandExcluded(transformed.product.brand_name)) continue;
-          await upsertProductAndVariants(client, transformed);
+          if (require("../kidsProductFilter").isKidsProduct(transformed.product)) continue;
+          const result = await upsertProductAndVariants(client, transformed);
+          if (result && result.skipped) continue;
           syncedProductIds.add(String(raw.id));
           successCount += 1;
         } catch (err) {

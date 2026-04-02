@@ -17,7 +17,7 @@ const DashboardService = {
         "SELECT SUM(total_amount) FROM orders WHERE deleted_at IS NULL AND payment_status = 'paid'"
       );
       let totalVendors = await client.query(
-        "SELECT COUNT(*) FROM vendors WHERE  deleted_at IS NULL AND status = 'active'"
+        "SELECT COUNT(*) FROM vendors"
       );
       let totalUnpaidAmount = await client.query(
         "SELECT SUM(total_amount) FROM orders WHERE deleted_at IS NULL AND payment_status = 'pending'"
