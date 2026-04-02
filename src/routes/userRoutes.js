@@ -11,12 +11,21 @@ router.get("/ok", (req, res) => {
 });
 
 router.post("/request-access", indexCtrl.accessRequestController.createAccessRequest);
+router.post(
+  "/access-request-status",
+  indexCtrl.accessRequestController.getAccessRequestStatus
+);
 router.post("/register-user", indexCtrl.userAuthController.registerUser);
 router.post(
   "/register-guest-user",
   indexCtrl.userAuthController.registerGuestUser
 );
 router.post("/send-magic-link", indexCtrl.userAuthController.sendMagicLink);
+router.post("/send-login-otp", indexCtrl.userAuthController.sendLoginOtp);
+router.post(
+  "/verify-login-otp",
+  indexCtrl.userAuthController.verifyLoginOtp
+);
 router.post(
   "/login-with-magic-link",
   indexCtrl.userAuthController.loginWithMagicLink

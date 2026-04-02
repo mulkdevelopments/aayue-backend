@@ -534,7 +534,16 @@ router.post(
 
 /**=================Contact us================= */
 router.get("/get-access-requests", protectAdmin, indexCtrl.accessRequestController.getAllAccessRequests);
-router.post("/send-magic-link-to-request", protectAdmin, indexCtrl.accessRequestController.sendMagicLinkToRequest);
+router.post(
+  "/approve-access-request",
+  protectAdmin,
+  indexCtrl.accessRequestController.approveAccessRequest
+);
+router.post(
+  "/send-magic-link-to-request",
+  protectAdmin,
+  indexCtrl.accessRequestController.approveAccessRequest
+);
 router.get("/get-contact-messages", indexCtrl.contactUsController.getAllContactMessages);
 router.get("/get-contact-message", indexCtrl.contactUsController.getContactMessage);
 router.delete("/delete-contact-message", indexCtrl.contactUsController.deleteContactMessage);

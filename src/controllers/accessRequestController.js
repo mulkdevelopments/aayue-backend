@@ -3,14 +3,9 @@ const catchAsync = require("../errorHandling/catchAsync");
 const sendResponse = require("../utils/sendResponse");
 const { randomUUID } = require("crypto");
 const dbPool = require("../db/dbConnection");
-const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const { UserServices } = require("../services/userServices");
 const { isValidEmail } = require("../utils/basicValidation");
-
-const generateMagicToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "15m" });
-};
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "email-smtp.eu-north-1.amazonaws.com",
@@ -20,6 +15,33 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+});
+
+/**
+ * Public: latest access-request state for an email (for storefront dialogs).
+ * accessStatus: none | pending | approved
+ */
+module.exports.getAccessRequestStatus = catchAsync(async (req, res, next) => {
+  let { email } = req.body;
+  if (!isValidEmail(email)) return next(new AppError("Invalid email", 400));
+  email = email.toLowerCase().trim();
+
+  const { rows } = await dbPool.query(
+    `SELECT status FROM access_requests
+     WHERE LOWER(TRIM(email)) = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [email]
+  );
+  const row = rows[0];
+  let accessStatus = "none";
+  if (row) {
+    const st = String(row.status || "");
+    if (st === "approved" || st === "link_sent") accessStatus = "approved";
+    else if (st === "pending") accessStatus = "pending";
+  }
+
+  return sendResponse(res, 200, true, "OK", { accessStatus });
 });
 
 /** Public: submit access request (non-allowed domain users) */
@@ -34,6 +56,37 @@ module.exports.createAccessRequest = catchAsync(async (req, res, next) => {
   }
 
   const normalizedEmail = email.toLowerCase().trim();
+
+  const { rows: existingRows } = await dbPool.query(
+    `SELECT id, status FROM access_requests
+     WHERE LOWER(TRIM(email)) = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [normalizedEmail]
+  );
+  const latest = existingRows[0];
+  if (latest) {
+    const st = String(latest.status || "");
+    if (st === "approved" || st === "link_sent") {
+      return sendResponse(
+        res,
+        200,
+        true,
+        "You are already approved. Open Sign in, enter this email, and we will email you a one-time code to complete login.",
+        { alreadyApproved: true, email: normalizedEmail }
+      );
+    }
+    if (st === "pending") {
+      return sendResponse(
+        res,
+        200,
+        true,
+        "We already have an access request for this email. Please wait — we will email you as soon as it is reviewed.",
+        { alreadyPending: true, email: normalizedEmail }
+      );
+    }
+  }
+
   const id = randomUUID();
 
   await dbPool.query(
@@ -42,11 +95,18 @@ module.exports.createAccessRequest = catchAsync(async (req, res, next) => {
     [id, full_name.trim(), normalizedEmail]
   );
 
-  return sendResponse(res, 201, true, "Access request submitted. We'll be in touch.", {
-    id,
-    full_name: full_name.trim(),
-    email: normalizedEmail,
-  });
+  return sendResponse(
+    res,
+    201,
+    true,
+    `Thanks, ${full_name.trim().split(/\s+/)[0] || "there"}. We received your request and will email you at ${normalizedEmail} when your access is approved.`,
+    {
+      id,
+      full_name: full_name.trim(),
+      email: normalizedEmail,
+      submitted: true,
+    }
+  );
 });
 
 /** Admin: list all access requests */
@@ -59,8 +119,11 @@ module.exports.getAllAccessRequests = catchAsync(async (req, res, next) => {
   return sendResponse(res, 200, true, "Access requests fetched", result.rows);
 });
 
-/** Admin: send magic link to a requested user (create user if not exists, then send link) */
-module.exports.sendMagicLinkToRequest = catchAsync(async (req, res, next) => {
+/**
+ * Admin: approve access request — create user if needed, mark approved,
+ * email the requester that they can sign in (they use normal email + OTP on the site).
+ */
+module.exports.approveAccessRequest = catchAsync(async (req, res, next) => {
   const { id } = req.body;
   if (!id) return next(new AppError("Request id is required", 400));
 
@@ -93,35 +156,29 @@ module.exports.sendMagicLinkToRequest = catchAsync(async (req, res, next) => {
       );
     }
 
-    const token = generateMagicToken(user.id);
-    const baseUrl = process.env.CLIENT_URL || "https://aayeu.com";
-    const magicLink = `${baseUrl}/auth?type=magic-login&token=${token}`;
-
-    await UserServices.updateUserMagicToken(
-      {
-        userId: user.id,
-        token,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-      },
-      client
-    );
+    const siteUrl =
+      process.env.CLIENT_URL ||
+      process.env.FRONTEND_URL ||
+      "https://aayeu.com";
 
     const mailOptions = {
       from: `"${process.env.EMAIL_SENDER_NAME || "AAYEU Support"}" <no-reply@aayeu.com>`,
       to: email,
-      subject: "Your AAYEU Access — Magic Login Link",
+      subject: "Your AAYEU access has been approved",
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 25px; background-color: #f9f9f9; border-radius: 10px;">
-          <h2 style="color: #333;">Hi ${full_name || "there"} 👋</h2>
-          <p style="color: #555;">Your access request to <b>AAYEU</b> has been approved.</p>
-          <p>Click the button below to log in:</p>
-          <a href="${magicLink}" 
-            style="display:inline-block; padding:12px 20px; background-color:#007bff; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold;">
-            Login Now
-          </a>
-          <p style="margin-top:20px; color:#777;">This link expires in <b>15 minutes</b>.</p>
-          <hr style="margin-top:25px; border:none; border-top:1px solid #eee;"/>
-          <p style="font-size:12px; color:#aaa;">© ${new Date().getFullYear()} AAYEU.</p>
+        <div style="font-family: Arial, sans-serif; padding: 24px; background: #fafafa; border-radius: 10px; max-width: 560px;">
+          <h2 style="color: #333;">Hi ${full_name || "there"},</h2>
+          <p style="color: #555; line-height: 1.5;">Great news — your access request for <b>AAYEU</b> has been <b>approved</b>.</p>
+          <p style="color: #555; line-height: 1.5;">You can sign in now using your email address. We’ll send you a short verification code when you choose to log in.</p>
+          <p style="margin: 24px 0;">
+            <a href="${siteUrl}/auth?type=signin"
+               style="display:inline-block; padding: 12px 22px; background-color: #111; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold;">
+              Go to sign in
+            </a>
+          </p>
+          <p style="color: #888; font-size: 13px;">If you didn’t request access, you can ignore this email.</p>
+          <hr style="margin-top: 24px; border: none; border-top: 1px solid #eee;" />
+          <p style="font-size: 12px; color: #aaa;">© ${new Date().getFullYear()} AAYEU</p>
         </div>
       `,
     };
@@ -129,15 +186,15 @@ module.exports.sendMagicLinkToRequest = catchAsync(async (req, res, next) => {
     await transporter.sendMail(mailOptions);
 
     await client.query(
-      `UPDATE access_requests SET status = 'link_sent', magic_link_sent_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      `UPDATE access_requests SET status = 'approved', magic_link_sent_at = NOW(), updated_at = NOW() WHERE id = $1`,
       [id]
     );
 
     await client.query("COMMIT");
 
-    return sendResponse(res, 200, true, "Magic link sent to " + email, {
+    return sendResponse(res, 200, true, "Request approved and notification sent to " + email, {
       email,
-      magicLinkSent: true,
+      approved: true,
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -146,3 +203,6 @@ module.exports.sendMagicLinkToRequest = catchAsync(async (req, res, next) => {
     client.release();
   }
 });
+
+/** @deprecated Use approveAccessRequest — kept for older admin clients. */
+module.exports.sendMagicLinkToRequest = module.exports.approveAccessRequest;

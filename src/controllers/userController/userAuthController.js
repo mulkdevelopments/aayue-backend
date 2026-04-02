@@ -12,13 +12,12 @@ const nodemailer = require("nodemailer");
 const { generateAuthUrl: generateGoogleAuthUrl } = require("../../utils/googleAuth");
 const appleAuth = require("../../utils/appleAuth");
 const { createToken } = require("../../utils/helper");
-
-// Generate Magic Link Token
-const generateMagicToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: "15m", // token valid for 15 min
-  });
-};
+const {
+  OTP_EXPIRY_MS,
+  hashUserLoginOtp,
+  generateSixDigitOtp,
+  buildUserLoginOtpEmailHtml,
+} = require("../../utils/userLoginOtp");
 
 // module.exports.registerUser = catchAsync(async (req, res, next) => {
 //     let { full_name, email, phone } = req.body;
@@ -65,6 +64,28 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASS,
   },
 });
+
+async function sendOtpEmailToUser(client, user, email, { subject, greetingName, headline, extraParagraph }) {
+  const otp = generateSixDigitOtp();
+  const otpHash = hashUserLoginOtp(user.id, otp);
+  const expiresAt = new Date(Date.now() + OTP_EXPIRY_MS);
+  await UserServices.updateUserMagicToken(
+    { userId: user.id, token: otpHash, expiresAt },
+    client
+  );
+  const mailOptions = {
+    from: `"${process.env.EMAIL_SENDER_NAME || "AAYEU Support"}" <no-reply@aayeu.com>`,
+    to: email,
+    subject,
+    html: buildUserLoginOtpEmailHtml({
+      otp,
+      greetingName,
+      headline,
+      extraParagraph,
+    }),
+  };
+  await transporter.sendMail(mailOptions);
+}
 
 module.exports.registerGuestUser = catchAsync(async (req, res, next) => {
   let { full_name, email, phone } = req.body;
@@ -172,59 +193,18 @@ module.exports.registerUser = catchAsync(async (req, res, next) => {
       client
     );
 
-    // ✅ Generate magic token & link
-    const token = generateMagicToken(user.id);
-
-    const { redirectUrl } = req.body;
-    const { isValidRedirectUrl } = require("../../utils/basicValidation");
-
-    let baseUrl = process.env.CLIENT_URL;
-    if (redirectUrl && isValidRedirectUrl(redirectUrl)) {
-      baseUrl = redirectUrl;
-    }
-
-    const magicLink = `${baseUrl}/auth?type=magic-login&token=${token}`;
-
-    // ✅ Save token to DB
-    await UserServices.updateUserMagicToken(
-      {
-        userId: user.id,
-        token,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min expiry
-      },
-      client
-    );
-
-    // ✅ Send magic link email
-    const mailOptions = {
-      from: `"${process.env.EMAIL_SENDER_NAME || "AAYEU Support"
-        }" <no-reply@aayeu.com>`,
-      to: email,
-      subject: "Welcome to AAYEU — Complete Your Login",
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 25px; background-color: #f9f9f9; border-radius: 10px;">
-          <h2 style="color: #333;">Welcome, ${full_name || "there"} 👋</h2>
-          <p style="color: #555;">Thanks for registering with <b>AAYEU</b>!</p>
-          <p>Click the button below to verify your email and log in instantly:</p>
-          <a href="${magicLink}" 
-            style="display:inline-block; padding:12px 20px; background-color:#007bff; color:#fff; text-decoration:none; border-radius:6px; font-weight:bold;">
-            Verify & Login
-          </a>
-          <p style="margin-top:20px; color:#777;">This link expires in <b>15 minutes</b>.</p>
-          <p style="color:#999;">If you didn’t register, you can ignore this email.</p>
-          <hr style="margin-top:25px; border:none; border-top:1px solid #eee;"/>
-          <p style="font-size:12px; color:#aaa; text-align:center;">© ${new Date().getFullYear()} AAYEU. All rights reserved.</p>
-        </div>
-      `,
-    };
-
-    await transporter.sendMail(mailOptions);
+    await sendOtpEmailToUser(client, user, email, {
+      subject: "Welcome to AAYEU — Your verification code",
+      greetingName: full_name || "there",
+      headline: "Thanks for registering with <b>AAYEU</b>. Use this code to verify your email and sign in:",
+      extraParagraph:
+        '<p style="color:#555;">Enter the code on the sign-in page when prompted.</p>',
+    });
 
     await client.query("COMMIT"); // commit transaction
 
-    return sendResponse(res, 200, true, "Magic link sent to your email", {
+    return sendResponse(res, 200, true, "We sent a verification code to your email", {
       ...user,
-      magicLink,
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -234,7 +214,7 @@ module.exports.registerUser = catchAsync(async (req, res, next) => {
   }
 });
 
-module.exports.sendMagicLink = catchAsync(async (req, res, next) => {
+module.exports.sendLoginOtp = catchAsync(async (req, res, next) => {
   let { email } = req.body;
   if (!isValidEmail(email)) return next(new AppError("Invalid email", 400));
   email = email.toLowerCase();
@@ -246,58 +226,16 @@ module.exports.sendMagicLink = catchAsync(async (req, res, next) => {
     const user = await UserServices.findUserByEmail(email, client);
     if (!user) throw new AppError("User not found", 404);
 
-    // ✅ Generate magic link token
-    const token = generateMagicToken(user.id);
-
-    const { redirectUrl } = req.body;
-    const { isValidRedirectUrl } = require("../../utils/basicValidation");
-
-    let baseUrl = process.env.CLIENT_URL;
-    if (redirectUrl && isValidRedirectUrl(redirectUrl)) {
-      baseUrl = redirectUrl;
-    }
-
-    const magicLink = `${baseUrl}/auth?type=magic-login&token=${token}`;
-
-    // ✅ Save token in DB
-    await UserServices.updateUserMagicToken(
-      {
-        userId: user.id,
-        token,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min expiry
-      },
-      client
-    );
-
-    // ✅ Send Magic Link Email
-    const mailOptions = {
-      from: `"${process.env.EMAIL_SENDER_NAME || "Support"}" <no-reply@aayeu.com>`,
-      to: email,
-      subject: "Your Magic Login Link",
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; background: #fafafa; border-radius: 10px;">
-          <h2>Hi ${user.name || "there"},</h2>
-          <p>Click the button below to securely log in to your account:</p>
-          <a href="${magicLink}" 
-            style="display:inline-block; padding:10px 20px; background-color:#007bff; color:#fff; text-decoration:none; border-radius:5px;">
-            Login Now
-          </a>
-          <p style="margin-top:15px;">This link will expire in 15 minutes.</p>
-          <p>If you didn't request this, you can ignore this email.</p>
-          <hr/>
-          <p style="font-size:12px; color:#777;">© ${new Date().getFullYear()} Your Company. All rights reserved.</p>
-        </div>
-      `,
-    };
-
-    await transporter.sendMail(mailOptions);
+    const greetingName = user.full_name || user.name || "there";
+    await sendOtpEmailToUser(client, user, email, {
+      subject: "Your AAYEU sign-in code",
+      greetingName,
+      headline: "Use this code to sign in to your account:",
+    });
 
     await client.query("COMMIT");
 
-    return sendResponse(res, 200, true, "Magic link sent to your email", {
-      ...user,
-      magicLink,
-    });
+    return sendResponse(res, 200, true, "We sent a login code to your email", null);
   } catch (err) {
     await client.query("ROLLBACK");
     return next(err);
@@ -306,40 +244,75 @@ module.exports.sendMagicLink = catchAsync(async (req, res, next) => {
   }
 });
 
-// module.exports.sendMagicLink = catchAsync(async (req, res, next) => {
-//     let { email } = req.body;
-//     if (!isValidEmail(email)) return next(new AppError("Invalid email", 400));
-//     email = email.toLowerCase();
-//     const client = await dbPool.connect(); // get transaction client
-//     try {
-//         await client.query("BEGIN"); // start transaction
+/** @deprecated Use sendLoginOtp — kept for older clients; sends OTP email, not a link. */
+module.exports.sendMagicLink = module.exports.sendLoginOtp;
 
-//         const user = await UserServices.findUserByEmail(email, client);
-//         if (!user) {
-//             throw new AppError("User not found", 404);
-//         }
+module.exports.verifyLoginOtp = catchAsync(async (req, res, next) => {
+  let email = req.body?.email;
+  const normalizedOtp = String(req.body?.otp ?? "").replace(/\s/g, "");
+  if (!isValidEmail(email)) return next(new AppError("Invalid email", 400));
+  if (!/^\d{6}$/.test(normalizedOtp)) {
+    return next(new AppError("Enter the 6-digit code from your email", 400));
+  }
+  email = email.toLowerCase();
 
-//         const token = generateMagicToken(user.id);
-//         const magicLink = `${process.env.CLIENT_URL}/auth?type=magic-login&token=${token}`;
+  const client = await dbPool.connect();
+  try {
+    await client.query("BEGIN");
 
-//         await UserServices.updateUserMagicToken({
-//             userId: user.id,
-//             token,
-//             expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min expiry
-//         }, client);
+    const user = await UserServices.findUserByEmail(email, client);
+    if (!user) throw new AppError("User not found", 404);
 
-//         //send email with magic link here using your email service
+    const storedToken = user.magic_token || user.magicToken || null;
+    const expiresAt =
+      user.magic_token_expires_at ||
+      user.magic_token_expires ||
+      user.magicTokenExpires ||
+      null;
 
-//         await client.query("COMMIT"); // commit transaction
+    if (!storedToken || !expiresAt || new Date(expiresAt) < new Date()) {
+      throw new AppError("Code expired or invalid. Request a new code.", 400);
+    }
 
-//         return sendResponse(res, 200, true, "Magic link sent to your email", { ...user, magicLink });
-//     } catch (err) {
-//         await client.query("ROLLBACK"); // rollback on error
-//         return next(err);
-//     } finally {
-//         client.release(); // release client
-//     }
-// });
+    if (String(storedToken).includes(".")) {
+      throw new AppError(
+        "Open the link in your email to sign in, or request a new login code.",
+        400
+      );
+    }
+
+    const submittedHash = hashUserLoginOtp(user.id, normalizedOtp);
+    const storedBuf = Buffer.from(String(storedToken), "utf8");
+    const submittedBuf = Buffer.from(submittedHash, "utf8");
+    if (
+      storedBuf.length !== submittedBuf.length ||
+      !crypto.timingSafeEqual(storedBuf, submittedBuf)
+    ) {
+      throw new AppError("Invalid code", 400);
+    }
+
+    await UserServices.updateUserMagicToken(
+      { userId: user.id, token: null, expiresAt: null },
+      client
+    );
+
+    const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+      expiresIn: "1d",
+    });
+
+    await client.query("COMMIT");
+
+    return sendResponse(res, 200, true, "Login successful", {
+      ...user,
+      accessToken,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return next(err);
+  } finally {
+    client.release();
+  }
+});
 
 module.exports.loginWithMagicLink = catchAsync(async (req, res, next) => {
   const { token } = req.body;
