@@ -780,6 +780,13 @@ COMMENT ON TABLE brand_highlights IS 'Curated brand tiles on homepage; brand_nam
 CREATE INDEX IF NOT EXISTS idx_pom_our_category_id ON product_our_category_map(our_category_id);
 CREATE INDEX IF NOT EXISTS idx_pom_product_id ON product_our_category_map(product_id);
 `,
+
+  `-- Size normalization: canonical size + size type for clean filtering
+ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS normalized_size_final VARCHAR(128);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_pv_size_type_canonical
+  ON product_variants(size_type, normalized_size_final)
+  WHERE deleted_at IS NULL AND normalized_size_final IS NOT NULL;
+`,
 ];
 
 module.exports = migrationFiles;

@@ -15,6 +15,8 @@ const {
 } = require("./peppelaHelper");
 const { toJsonb, slugify } = require("../../../../importHelpers");
 const { normalizeBrandName } = require("../../../utils/normalize");
+const { normalizeSize } = require("../../../utils/normalizeSize");
+const { categoryHintFromPath } = require("../../../utils/sizeConversion");
 const { getMarginSettings, computeTieredPricing } = require("../../../utils/marginHelper");
 
 const logger = pino({ level: process.env.IMPORT_LOG_LEVEL || "info" });
@@ -363,13 +365,19 @@ async function transformPeppelaProduct(product, marginConfig) {
       stockQty = stock?.quantity ? Number(stock.quantity) : 0;
     }
 
+    const _catH = categoryHintFromPath(categoryPath);
+    const _genH = inferredGender || null;
+    const _sz = normalizeSize(variantSize, _catH, _genH);
+
     variants.push({
       sku: combination.reference || `${productSku}-${combinationId}`,
       vendor_product_id: combinationId,
       variant_size: variantSize,
       variant_color: variantColor,
       normalized_size: variantSize,
+      normalized_size_final: _sz.canonical || variantSize,
       normalized_color: variantColor,
+      size_type: _sz.sizeType || null,
       stock: stockQty,
       vendormrp: baseVariantMrp,
       vendorsaleprice: baseVariantPrice,
@@ -640,8 +648,10 @@ async function upsertProductAndVariants(client, transformed) {
               variant_size = $12,
               normalized_size = $13,
               normalized_color = $14,
+              normalized_size_final = $15,
+              size_type = $16,
               updated_at = now()
-            WHERE id = $15
+            WHERE id = $17
           `,
           [
             PEPPELA_VENDOR_ID,
@@ -658,6 +668,8 @@ async function upsertProductAndVariants(client, transformed) {
             v.variant_size || null,
             v.normalized_size || null,
             v.normalized_color || null,
+            v.normalized_size_final || v.normalized_size || null,
+            v.size_type || null,
             vid,
           ]
         );
@@ -671,13 +683,13 @@ async function upsertProductAndVariants(client, transformed) {
             attributes, images, image_urls, video1, video2, vendormrp, vendorsaleprice,
             tax, tax1, tax2, tax3, variant_color, variant_size,
             country_of_origin, is_active, normalized_size, normalized_color, size_type,
-            created_at, updated_at
+            normalized_size_final, created_at, updated_at
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,
             $8,$9,$10,$11,$12::jsonb,$13,$14,$15,
             $16::jsonb,$17::jsonb,$18::jsonb,$19,$20,$21,$22,
             $23::jsonb,$24,$25,$26,$27,$28,
-            $29,$30,$31,$32,$33, now(), now()
+            $29,$30,$31,$32,$33,$34, now(), now()
           ) RETURNING id
         `;
 
@@ -714,7 +726,8 @@ async function upsertProductAndVariants(client, transformed) {
           true,
           v.normalized_size || null,
           v.normalized_color || null,
-          null,
+          v.size_type || null,
+          v.normalized_size_final || v.normalized_size || null,
         ];
 
         const inserted = await client.query(insertVariantSql, vals);

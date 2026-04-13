@@ -933,7 +933,7 @@ const ProductService = {
          EXISTS (
              SELECT 1 FROM product_variants pv
              WHERE pv.product_id = p.id
-               AND (pv.variant_size = ANY($${idx}::text[]) OR pv.attributes->>'size' = ANY($${idx}::text[]))
+               AND pv.normalized_size_final = ANY($${idx}::text[])
          )
        `);
        idx++;
@@ -1055,7 +1055,7 @@ const ProductService = {
       sizes = [],
       min_price,
       max_price,
-      gender,
+      genders = [],
       country,
       sku,
       dynamic_filters = [],
@@ -1069,7 +1069,7 @@ const ProductService = {
         filters: true,
         media: true,
       },
-      user_id = null, // ✅ added for wishlist
+      user_id = null,
     } = options;
 
     const whereClauses = ["p.deleted_at IS NULL"];
@@ -1215,10 +1215,15 @@ const ProductService = {
       idx++;
     }
 
-    if (gender) {
-      params.push(gender);
-      whereClauses.push(`LOWER(p.gender) = LOWER($${idx})`);
-      idx++;
+    if (genders.length > 0) {
+      const normalizedGenders = genders
+        .map((g) => String(g).trim().toLowerCase())
+        .filter(Boolean);
+      if (normalizedGenders.length > 0) {
+        params.push(normalizedGenders);
+        whereClauses.push(`LOWER(p.gender) = ANY($${idx}::text[])`);
+        idx++;
+      }
     }
 
     if (country) {
@@ -1271,12 +1276,8 @@ const ProductService = {
         EXISTS (
             SELECT 1 FROM product_variants pv
             WHERE pv.product_id = p.id
-              AND (
-                pv.normalized_size_final = ANY($${idx}::text[])
-                OR pv.normalized_size = ANY($${idx}::text[])
-                OR pv.variant_size = ANY($${idx}::text[])
-                OR pv.attributes->>'size' = ANY($${idx}::text[])
-              )
+              AND pv.normalized_size_final = ANY($${idx}::text[])
+              AND pv.stock > 0
         )
       `);
       idx++;

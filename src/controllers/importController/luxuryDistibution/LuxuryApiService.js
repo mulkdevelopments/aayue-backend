@@ -7,6 +7,8 @@ const path = require("path");
 require("dotenv").config({ path: "../../../../.env" });
 const dbPool = require("../../../db/dbConnection");
 const { normalizeBrandName } = require("../../../utils/normalize");
+const { normalizeSize } = require("../../../utils/normalizeSize");
+const { categoryHintFromPath, genderHintFromPath } = require("../../../utils/sizeConversion");
 // const dotenv = require("dotenv");
 
 // dotenv.config();
@@ -199,15 +201,19 @@ function transformLuxuryProduct(api) {
       // we still create variant even if stock = 0
       const variantSku = `${sku}-${size}`;
 
+      const _catHint = categoryHintFromPath(category_string);
+      const _genHint = genderHintFromPath(category_string) || (gender?.name || "").toLowerCase() || null;
+      const _sz = normalizeSize(size, _catHint, _genHint);
+
       variants.push({
         sku: variantSku,
         vendor_product_id: String(id),
         variant_size: size,
         variant_color: color_detail || null,
         stock,
-        price: selling_price, // raw vendor selling price (currency from API)
-        vendormrp: original_price, // raw vendor MRP
-        vendorsaleprice: selling_price, // raw vendor sale price (or cost)
+        price: selling_price,
+        vendormrp: original_price,
+        vendorsaleprice: selling_price,
         ourmrp: null,
         oursaleprice: null,
         tax: null,
@@ -217,8 +223,9 @@ function transformLuxuryProduct(api) {
         country_of_origin: made_in || null,
         is_active: true,
         normalized_size: size,
+        normalized_size_final: _sz.canonical || size,
         normalized_color: color_detail || null,
-        size_type: size_info || null,
+        size_type: _sz.sizeType || size_info || null,
         images, // same image array per variant
         attributes: {
           size,
@@ -540,8 +547,9 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
             normalized_size  = $13,
             normalized_color = $14,
             size_type        = $15,
+            normalized_size_final = $16,
             updated_at       = now()
-          WHERE id = $16
+          WHERE id = $17
         `,
           [
             LUXURY_VENDOR_ID,
@@ -559,6 +567,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
             v.normalized_size || v.variant_size || null,
             v.normalized_color || v.variant_color || null,
             v.size_type || null,
+            v.normalized_size_final || v.normalized_size || v.variant_size || null,
             vid,
           ]
         );
@@ -575,14 +584,14 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
             video1, video2, vendormrp, vendorsaleprice,
             tax, tax1, tax2, tax3, variant_color, variant_size,
             country_of_origin, is_active, normalized_size, normalized_color, size_type,
-            created_at, updated_at
+            normalized_size_final, created_at, updated_at
           )
           VALUES (
             $1,$2,$3,$4,$5,$6,$7,
             $8,$9,$10,$11,$12::jsonb,
             $13,$14,$15,$16::jsonb,$17::jsonb,$18::jsonb,
             $19,$20,$21,$22,$23::jsonb,$24,$25,$26,$27,$28,
-            $29,$30,$31,$32,$33, now(), now()
+            $29,$30,$31,$32,$33,$34, now(), now()
           ) RETURNING id
         `;
 
@@ -594,22 +603,22 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           v.barcode || null, // $5
           v.vendor_product_id || product.productid || null, // $6
           null, // $7 productpartnersku
-          ourPrice, // $8 price (our calculated price = vendorsaleprice * 3)
-          ourMrp, // $9 mrp (our calculated MRP)
-          v.stock || 0, // $10 stock
-          v.weight || null, // $11 weight
-          toJsonb(v.dimension || null), // $12 dimension
+          ourPrice, // $8
+          ourMrp, // $9
+          v.stock || 0, // $10
+          v.weight || null, // $11
+          toJsonb(v.dimension || null), // $12
           v.length || null, // $13
           v.width || null, // $14
           v.height || null, // $15
-          toJsonb(v.attributes || null), // $16 attributes
-          toJsonb(v.images || null), // $17 images
+          toJsonb(v.attributes || null), // $16
+          toJsonb(v.images || null), // $17
           null, // $18 image_urls
           v.video1 || null, // $19
           v.video2 || null, // $20
-          rawVendorMrp || null, // $21 vendormrp
-          rawVendorSale || null, // $22 vendorsaleprice
-          toJsonb(v.tax || null), // $23 tax
+          rawVendorMrp || null, // $21
+          rawVendorSale || null, // $22
+          toJsonb(v.tax || null), // $23
           v.tax1 || null, // $24
           v.tax2 || null, // $25
           v.tax3 || null, // $26
@@ -620,6 +629,7 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
           v.normalized_size || v.variant_size || null, // $31
           v.normalized_color || v.variant_color || null, // $32
           v.size_type || null, // $33
+          v.normalized_size_final || v.normalized_size || v.variant_size || null, // $34
         ];
 
         const inVar = await client.query(variantInsertText, variantVals);

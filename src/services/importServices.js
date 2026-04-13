@@ -1399,59 +1399,61 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
             video1, video2, vendormrp, vendorsaleprice, ourmrp, oursaleprice,
             tax, tax1, tax2, tax3, variant_color, variant_size,
             country_of_origin, is_active, normalized_size, normalized_color, size_type,
-            currency, conversion_rate, vmrp_to_aed, vsale_to_aed, created_at, updated_at
+            currency, conversion_rate, vmrp_to_aed, vsale_to_aed, normalized_size_final,
+            created_at, updated_at
           )
           VALUES (
             $1,$2,$3,$4,$5,$6,$7,
             $8,$9,$10,$11,$12,$13::jsonb,
             $14,$15,$16,$17::jsonb,$18::jsonb,$19::jsonb,
             $20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,$29,$30,$31,$32,
-            $33,$34,$35,$36,$37,$38,$39,$40, now(), now()
+            $33,$34,$35,$36,$37,$38,$39,$40,$41, now(), now()
           )
           RETURNING id
         `;
 
                 const variantVals = [
-                    variantId,                      // $1 id
-                    VENDOR_ID,                      // $2 vendor_id
-                    productId,                      // $3 product_id
-                    v.sku,                          // $4 sku
-                    v.barcode || null,              // $5 barcode
-                    v.vendor_product_id || null,    // $6 vendor_product_id
-                    null,                           // $7 productpartnersku
-                    v.price || null,                // $8 price
-                    convertedMrp,                   // $9 mrp (converted + increment)
-                    convertedSale,                  // $10 sale_price (converted + increment)
-                    v.stock || 0,                   // $11 stock
-                    v.weight || null,               // $12 weight
-                    helpers.toJsonb(v.dimension || null), // $13 dimension (jsonb)
-                    v.length || null,               // $14 length
-                    v.width || null,                // $15 width
-                    v.height || null,               // $16 height
-                    helpers.toJsonb(v.attributes || null),// $17 attributes (jsonb)
-                    helpers.toJsonb(v.images || null),    // $18 images (jsonb)
-                    null,                           // $19 image_urls
-                    v.video1 || null,               // $20 video1
-                    v.video2 || null,               // $21 video2
-                    rawVendorMrp || null,           // $22 vendormrp (raw vendor mrp)
-                    rawVendorSale || null,          // $23 vendorsaleprice (raw vendor sale)
-                    v.ourmrp || null,               // $24 ourmrp
-                    v.oursaleprice || null,         // $25 oursaleprice
-                    helpers.toJsonb(v.tax || null), // $26 tax (jsonb)
-                    v.tax1 || null,                 // $27 tax1
-                    v.tax2 || null,                 // $28 tax2
-                    v.tax3 || null,                 // $29 tax3
-                    v.variant_color || null,        // $30 variant_color
-                    v.variant_size || null,         // $31 variant_size
-                    v.country_of_origin || null,    // $32 country_of_origin
-                    v.is_active !== undefined ? v.is_active : true, // $33 is_active
-                    v.normalized_size || v.variant_size || null, // $34 normalized_size
-                    v.normalized_color || v.variant_color || null, // $35 normalized_color
-                    v.size_type || null,            // $36 size_type
-                    opts.currency || null,          // $37 currency
-                    opts.conversion_rate || null,   // $38 conversion_rate
-                    vmrp_to_aed,                    // $39 vmrp_to_aed (converted without increment)
-                    vsale_to_aed                    // $40 vsale_to_aed (converted without increment)
+                    variantId,                      // $1
+                    VENDOR_ID,                      // $2
+                    productId,                      // $3
+                    v.sku,                          // $4
+                    v.barcode || null,              // $5
+                    v.vendor_product_id || null,    // $6
+                    null,                           // $7
+                    v.price || null,                // $8
+                    convertedMrp,                   // $9
+                    convertedSale,                  // $10
+                    v.stock || 0,                   // $11
+                    v.weight || null,               // $12
+                    helpers.toJsonb(v.dimension || null), // $13
+                    v.length || null,               // $14
+                    v.width || null,                // $15
+                    v.height || null,               // $16
+                    helpers.toJsonb(v.attributes || null), // $17
+                    helpers.toJsonb(v.images || null),     // $18
+                    null,                           // $19
+                    v.video1 || null,               // $20
+                    v.video2 || null,               // $21
+                    rawVendorMrp || null,           // $22
+                    rawVendorSale || null,          // $23
+                    v.ourmrp || null,               // $24
+                    v.oursaleprice || null,         // $25
+                    helpers.toJsonb(v.tax || null), // $26
+                    v.tax1 || null,                 // $27
+                    v.tax2 || null,                 // $28
+                    v.tax3 || null,                 // $29
+                    v.variant_color || null,        // $30
+                    v.variant_size || null,         // $31
+                    v.country_of_origin || null,    // $32
+                    v.is_active !== undefined ? v.is_active : true, // $33
+                    v.normalized_size || v.variant_size || null, // $34
+                    v.normalized_color || v.variant_color || null, // $35
+                    v.size_type || null,            // $36
+                    opts.currency || null,          // $37
+                    opts.conversion_rate || null,   // $38
+                    vmrp_to_aed,                    // $39
+                    vsale_to_aed,                   // $40
+                    v.normalized_size_final || v.normalized_size || v.variant_size || null, // $41
                 ];
 
                 const inVar = await client.query(variantInsertText, variantVals);

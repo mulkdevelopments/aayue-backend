@@ -16,6 +16,8 @@ const {
   normalizeColorFilterParams,
   sqlVariantMatchesColorParams,
 } = require("../../utils/colorFilterSql");
+const filterCache = require("../../utils/filterCache");
+const { WOMEN_CLOTHING, MEN_CLOTHING, WOMEN_SHOES, MEN_SHOES, ALPHA_SORT_ORDER } = require("../../utils/sizeConversion");
 
 function validateCategoryIds(category_ids = []) {
   if (!Array.isArray(category_ids)) return false;
@@ -552,7 +554,6 @@ const jwt = require("jsonwebtoken");
 
 module.exports.getProductsFromOurCategories = catchAsync(
   async (req, res, next) => {
-    console.log("entering");
     const client = await dbPool.connect();
     try {
       const {
@@ -563,7 +564,6 @@ module.exports.getProductsFromOurCategories = catchAsync(
         vendor_id,
         min_price,
         max_price,
-        gender,
         country,
         sku,
         sort_by = "created_at",
@@ -573,7 +573,6 @@ module.exports.getProductsFromOurCategories = catchAsync(
         include = "variants,categories,filters,media",
       } = req.query;
 
-      // ✅ If category_slug is provided, look up category_id by exact slug match
       let resolvedCategoryId = category_id;
       if (!resolvedCategoryId && category_slug) {
         const slugLookup = await client.query(
@@ -585,7 +584,6 @@ module.exports.getProductsFromOurCategories = catchAsync(
         }
       }
 
-      // ✅ Parse multi-select filters
       const parseMulti = (v) => {
         if (!v) return [];
         if (Array.isArray(v)) return v.map((x) => x.trim());
@@ -598,6 +596,7 @@ module.exports.getProductsFromOurCategories = catchAsync(
       const brands = parseMulti(req.query.brand);
       const colors = parseMulti(req.query.color);
       const sizes = parseMulti(req.query.size);
+      const genders = parseMulti(req.query.gender);
 
       const page = Math.max(1, parseInt(pageQ, 10) || 1);
       const limit = Math.min(100, Math.max(1, parseInt(limitQ, 10) || 20));
@@ -610,18 +609,14 @@ module.exports.getProductsFromOurCategories = catchAsync(
           .filter(Boolean)
       );
 
-      // ✅ Decode JWT if available (for wishlist)
       let user_id = null;
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith("Bearer ")) {
         let token = authHeader.split(" ")[1];
         try {
           const decoded = jwt.verify(token, process.env.JWT_SECRET);
-          console.log("Decoded JWT for wishlist:", decoded);
-          user_id = decoded.id || decoded.user_id || decoded.userId; // support both naming styles
-          console.log("Decoded user_id for wishlist:", user_id);
+          user_id = decoded.id || decoded.user_id || decoded.userId;
         } catch (err) {
-          console.log("Invalid JWT token for wishlist check:", err.message);
           user_id = null;
         }
       }
@@ -636,14 +631,14 @@ module.exports.getProductsFromOurCategories = catchAsync(
         sizes,
         min_price: isNaN(Number(min_price)) ? null : Number(min_price),
         max_price: isNaN(Number(max_price)) ? null : Number(max_price),
-        gender,
+        genders,
         country,
         sku,
         sort_by,
         sort_order,
         limit,
         offset,
-        user_id, // ✅ pass user_id for wishlist check
+        user_id,
         include: {
           variants: includeParts.has("variants"),
           categories: includeParts.has("categories"),
@@ -1207,6 +1202,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
   try {
     const {
       category_id,
+      category_slug,
       vendor_id,
       brand,
       size,
@@ -1217,11 +1213,33 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       q,
     } = req.query;
 
+    // ── Cache: return cached facets if available (60 s TTL) ──
+    const cacheKey = filterCache.buildKey({
+      cat: category_id, cs: category_slug, q, vid: vendor_id,
+      b: brand, c: color, s: size, g: gender,
+      mn: min_price, mx: max_price,
+    });
+    const cached = filterCache.get(cacheKey);
+    if (cached) {
+      return sendResponse(res, 200, true, "Filters fetched", cached);
+    }
+
     if (category_id && !isValidUUID(category_id)) {
       return next(new AppError("Invalid category_id", 400));
     }
     if (vendor_id && !isValidUUID(vendor_id)) {
       return next(new AppError("Invalid vendor_id", 400));
+    }
+
+    let resolvedCategoryId = category_id;
+    if (!resolvedCategoryId && category_slug) {
+      const slugLookup = await client.query(
+        `SELECT id FROM categories WHERE slug = $1 AND is_our_category = true AND deleted_at IS NULL LIMIT 1`,
+        [category_slug]
+      );
+      if (slugLookup.rows.length > 0) {
+        resolvedCategoryId = slugLookup.rows[0].id;
+      }
     }
 
     const brands = Array.isArray(brand) ? brand : brand ? [brand] : [];
@@ -1232,7 +1250,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     let ourCatIds = [];
     let ourCategoryProductsExist = false;
 
-    if (category_id) {
+    if (resolvedCategoryId) {
       ourCatIds = await client
         .query(
           `
@@ -1245,7 +1263,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
           )
           SELECT id FROM our_subtree;
         `,
-          [category_id]
+          [resolvedCategoryId]
         )
         .then((res) => res.rows.map((r) => r.id));
 
@@ -1275,7 +1293,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
             AND pom.our_category_id = ANY($${baseParams.length}::uuid[])
         )
       `;
-    } else if (category_id) {
+    } else if (resolvedCategoryId) {
       return sendResponse(res, 200, true, "Filters fetched", {
         brands: [],
         colors: [],
@@ -1323,12 +1341,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
 
       if (includeSize && sizes.length > 0) {
         params.push(sizes);
-        where += ` AND (
-          pv.normalized_size_final = ANY($${params.length})
-          OR pv.normalized_size = ANY($${params.length})
-          OR pv.variant_size = ANY($${params.length})
-          OR pv.attributes->>'size' = ANY($${params.length})
-        )`;
+        where += ` AND pv.normalized_size_final = ANY($${params.length}) AND pv.stock > 0`;
       }
 
       if (includeColor && colors.length > 0) {
@@ -1476,22 +1489,14 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     const mergedSizeFacetsSQL = `
       WITH size_facets AS MATERIALIZED (
         SELECT DISTINCT p.id AS product_id,
-          COALESCE(
-            pv.normalized_size_final,
-            pv.normalized_size,
-            pv.variant_size,
-            pv.attributes->>'size'
-          ) AS size_val
+          pv.normalized_size_final AS size_val,
+          COALESCE(pv.size_type, 'Clothing') AS size_type
         FROM products p
         INNER JOIN product_our_category_map pom ON pom.product_id = p.id
         LEFT JOIN product_variants pv ON pv.product_id = p.id AND pv.deleted_at IS NULL
         WHERE __WHERE__
-          AND COALESCE(
-            pv.normalized_size_final,
-            pv.normalized_size,
-            pv.variant_size,
-            pv.attributes->>'size'
-          ) IS NOT NULL
+          AND pv.normalized_size_final IS NOT NULL
+          AND pv.stock > 0
       )
       SELECT
         COALESCE((
@@ -1500,12 +1505,12 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
         ), ARRAY[]::text[]) AS sizes,
         COALESCE((
           SELECT json_agg(
-            json_build_object('value', size_val, 'count', cnt) ORDER BY size_val
+            json_build_object('value', size_val, 'count', cnt, 'sizeType', size_type) ORDER BY size_type, size_val
           )
           FROM (
-            SELECT size_val, COUNT(DISTINCT product_id)::int AS cnt
+            SELECT size_val, size_type, COUNT(DISTINCT product_id)::int AS cnt
             FROM size_facets
-            GROUP BY size_val
+            GROUP BY size_val, size_type
           ) sc
         ), '[]'::json) AS size_counts_json;
     `;
@@ -1578,7 +1583,7 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
         client.query(mergedSizeFacetsSQL.replace("__WHERE__", sizeWhere.where), sizeWhere.params),
         client.query(mergedGenderFacetsSQL.replace("__WHERE__", genderWhere.where), genderWhere.params),
         client.query(activeFiltersSQL.replace("__WHERE__", priceWhere.where), priceWhere.params),
-        category_id ? client.query(childCatsSql, [category_id]) : Promise.resolve({ rows: [] }),
+        resolvedCategoryId ? client.query(childCatsSql, [resolvedCategoryId]) : Promise.resolve({ rows: [] }),
       ]);
 
     const rowB = brandMerged.rows[0] || {};
@@ -1586,13 +1591,28 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
     const rowS = sizeMerged.rows[0] || {};
     const rowG = genderMerged.rows[0] || {};
 
-    return sendResponse(res, 200, true, "Filters fetched", {
+    // Build grouped size data from the new size_counts with sizeType
+    const rawSizeCounts = jsonAggRows(rowS.size_counts_json);
+    const sizeGroupsMap = {};
+    for (const sc of rawSizeCounts) {
+      const grp = sc.sizeType || "Clothing";
+      if (!sizeGroupsMap[grp]) sizeGroupsMap[grp] = [];
+      sizeGroupsMap[grp].push({ value: sc.value, count: sc.count });
+    }
+
+    const responseData = {
       brands: rowB.brands || [],
       brand_counts: jsonAggRows(rowB.brand_counts_json),
       colors: rowC.colors || [],
       color_counts: jsonAggRows(rowC.color_counts_json),
       sizes: rowS.sizes || [],
-      size_counts: jsonAggRows(rowS.size_counts_json),
+      size_counts: rawSizeCounts,
+      sizeGroups: sizeGroupsMap,
+      sizeConversion: {
+        clothing: { women: WOMEN_CLOTHING, men: MEN_CLOTHING },
+        shoes: { women: WOMEN_SHOES, men: MEN_SHOES },
+        alphaSortOrder: ALPHA_SORT_ORDER,
+      },
       genders: rowG.genders || [],
       gender_counts: jsonAggRows(rowG.gender_counts_json),
       price: {
@@ -1601,7 +1621,10 @@ module.exports.getDynamicFilters = catchAsync(async (req, res, next) => {
       },
       total: Number(activeFiltersRes.rows[0].total || 0),
       child_categories: childCatsRes.rows || [],
-    });
+    };
+
+    filterCache.set(cacheKey, responseData);
+    return sendResponse(res, 200, true, "Filters fetched", responseData);
   } catch (err) {
     console.error("getDynamicFilters Error:", err);
     return next(new AppError(err.message || "Failed to load filters", 500));

@@ -1,6 +1,8 @@
 // importHelpers.js
 const { randomUUID } = require("crypto");
 const slugifyLib = require('slugify');
+const { normalizeSize } = require("../../../utils/normalizeSize");
+const { categoryHintFromPath, genderHintFromPath } = require("../../../utils/sizeConversion");
 
 /**
  * Converts a JS value to a JSONB-compatible string or null
@@ -111,6 +113,11 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
 
             const skuCandidate = get(m, 'model_id') || get(m, 'model_id') || `${product.product_sku || product.productid}-${m['model_id'] || randomUUID()}`;
 
+            const _rawSz = get(m, 'model_size') || null;
+            const _catH = categoryHintFromPath(categoryPath);
+            const _genH = genderHintFromPath(categoryPath) || (get(productRow, 'Genere') || "").toLowerCase() || null;
+            const _sz = normalizeSize(_rawSz, _catH, _genH);
+
             const v = {
                 sku: skuCandidate || null,
                 price: (parseFloat(get(productRow, 'sell_price')) || null),
@@ -120,22 +127,29 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
                 barcode: barcode,
                 vendor_product_id: get(m, 'model_id') || null,
                 attributes: {
-                    size: get(m, 'model_size') || null,
+                    size: _rawSz,
                     color: get(productRow, 'color') || null,
                 },
                 images: images.length ? images : null,
                 is_active: true,
                 variant_color: get(productRow, 'color') || null,
-                variant_size: get(m, 'model_size') || null,
+                variant_size: _rawSz,
                 weight: parseFloat(get(productRow, 'weight')) || null,
                 normalized_color: get(m, 'normalized_color') || null,
-                normalized_size: get(m, 'normalized_size') || null
+                normalized_size: get(m, 'normalized_size') || _rawSz,
+                normalized_size_final: _sz.canonical || _rawSz,
+                size_type: _sz.sizeType || null,
             };
             variants.push(v);
         }
     } else {
         // no model rows: create one variant from productRow
         const sku = get(productRow, 'code') || get(productRow, 'product_id') || randomUUID();
+        const _rawSz2 = get(productRow, 'model_size') || null;
+        const _catH2 = categoryHintFromPath(categoryPath);
+        const _genH2 = genderHintFromPath(categoryPath) || (get(productRow, 'Genere') || "").toLowerCase() || null;
+        const _sz2 = normalizeSize(_rawSz2, _catH2, _genH2);
+
         const v = {
             sku,
             price: (parseFloat(get(productRow, 'sell_price')) || null),
@@ -146,13 +160,15 @@ function transformGroupedRows(productRow = {}, modelRows = []) {
             vendor_product_id: get(productRow, 'model_id') || null,
             attributes: {
                 color: get(productRow, 'color') || null,
-                size: get(productRow, 'model_size') || null
+                size: _rawSz2
             },
             images: images.length ? images : null,
             is_active: true,
             variant_color: get(productRow, 'color') || null,
-            variant_size: get(productRow, 'model_size') || null,
-            weight: parseFloat(get(productRow, 'weight')) || null
+            variant_size: _rawSz2,
+            weight: parseFloat(get(productRow, 'weight')) || null,
+            normalized_size_final: _sz2.canonical || _rawSz2,
+            size_type: _sz2.sizeType || null,
         };
         variants.push(v);
     }

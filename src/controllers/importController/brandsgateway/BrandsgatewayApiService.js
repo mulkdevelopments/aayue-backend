@@ -3,6 +3,8 @@ const pino = require("pino");
 const { randomUUID } = require("crypto");
 const dbPool = require("../../../db/dbConnection");
 const { normalizeBrandName } = require("../../../utils/normalize");
+const { normalizeSize } = require("../../../utils/normalizeSize");
+const { categoryHintFromPath, genderHintFromPath } = require("../../../utils/sizeConversion");
 const {
   fetchProductsPage,
   fetchProductById,
@@ -179,13 +181,17 @@ async function transformBrandsgatewayProduct(product, marginConfig) {
         ? 1
         : 0;
 
+      const _sz = normalizeSize(variantSize || null, null, genderName);
+
       variants.push({
         sku: variation.sku || product.sku || `${product.id}-${variation.id}`,
         vendor_product_id: variation.id ? String(variation.id) : null,
         variant_size: variantSize || null,
         variant_color: variantColor || null,
         normalized_size: variantSize || null,
+        normalized_size_final: _sz.canonical || variantSize || null,
         normalized_color: variantColor || null,
+        size_type: _sz.sizeType || null,
         stock,
         vendormrp: regularPrice,
         vendorsaleprice: salePrice,
@@ -224,13 +230,17 @@ async function transformBrandsgatewayProduct(product, marginConfig) {
       ? 1
       : 0;
 
+    const _sz2 = normalizeSize(variantSize || null, null, genderName);
+
     variants.push({
       sku: product.sku || String(product.id),
       vendor_product_id: String(product.id),
       variant_size: variantSize || null,
       variant_color: variantColor || null,
       normalized_size: variantSize || null,
+      normalized_size_final: _sz2.canonical || variantSize || null,
       normalized_color: variantColor || null,
+      size_type: _sz2.sizeType || null,
       stock,
       vendormrp: regularPrice,
       vendorsaleprice: salePrice,
@@ -531,8 +541,10 @@ async function upsertProductAndVariants(client, transformed) {
               variant_size = $12,
               normalized_size = $13,
               normalized_color = $14,
+              normalized_size_final = $15,
+              size_type = $16,
               updated_at = now()
-            WHERE id = $15
+            WHERE id = $17
           `,
           [
             BRANDS_GATEWAY_VENDOR_ID,
@@ -549,6 +561,8 @@ async function upsertProductAndVariants(client, transformed) {
             v.variant_size || null,
             v.normalized_size || null,
             v.normalized_color || null,
+            v.normalized_size_final || v.normalized_size || null,
+            v.size_type || null,
             vid,
           ]
         );
@@ -560,10 +574,11 @@ async function upsertProductAndVariants(client, transformed) {
             id, vendor_id, product_id, sku, barcode, vendor_product_id, productpartnersku,
             vendormrp, vendorsaleprice, price, mrp, tax, tax1, tax2, tax3,
             stock, weight, attributes, images, variant_color, variant_size,
-            normalized_size, normalized_color, country_of_origin, is_active, created_at, updated_at
+            normalized_size, normalized_color, country_of_origin, is_active,
+            normalized_size_final, size_type, created_at, updated_at
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19::jsonb,
-            $20,$21,$22,$23,$24,$25, now(), now()
+            $20,$21,$22,$23,$24,$25,$26,$27, now(), now()
           )
         `;
 
@@ -593,6 +608,8 @@ async function upsertProductAndVariants(client, transformed) {
           v.normalized_color || null,
           v.country_of_origin || null,
           v.is_active !== undefined ? v.is_active : true,
+          v.normalized_size_final || v.normalized_size || null,
+          v.size_type || null,
         ]);
         createdVariants.push({ id: variantId, sku: v.sku, created: true });
       }
