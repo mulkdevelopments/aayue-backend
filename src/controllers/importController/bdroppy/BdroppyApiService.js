@@ -7,6 +7,8 @@
 const { randomUUID } = require("crypto");
 const dbPool = require("../../../db/dbConnection");
 const { normalizeBrandName } = require("../../../utils/normalize");
+const { normalizeSize } = require("../../../utils/normalizeSize");
+const { categoryHintFromPath, genderHintFromPath } = require("../../../utils/sizeConversion");
 const {
   getProductsExport,
   getCatalogs,
@@ -107,6 +109,11 @@ function transformBdroppyProduct(raw, imgBase, marginConfig) {
   const models = Array.isArray(raw.models) ? raw.models : [];
   const variants = [];
 
+  const { categoryCode: _tagCat, subcategoryCode: _tagSub } = getCategoryFromTags(raw.tags || []);
+  const _catHint = categoryHintFromPath(_tagCat || _tagSub || "");
+  const _genHint = genderHintFromPath(_tagCat || "") ||
+    ((raw.attributes && raw.attributes.gender) ? String(raw.attributes.gender).toLowerCase() : null);
+
   if (models.length > 0) {
     for (const m of models) {
       const vendorVariantId = m.id != null ? String(m.id) : null;
@@ -120,6 +127,9 @@ function transformBdroppyProduct(raw, imgBase, marginConfig) {
       const vendorMrp = streetPrice;
       const { ourPrice, ourMrp } = computeTieredPricing(vendorSale, vendorMrp, marginConfig);
 
+      const rawSize = (m.size || m.model) ? String(m.size || m.model).trim() : null;
+      const _sz = normalizeSize(rawSize, _catHint, _genHint);
+
       variants.push({
         sku,
         vendor_product_id: vendorVariantId,
@@ -130,11 +140,13 @@ function transformBdroppyProduct(raw, imgBase, marginConfig) {
         vendorsaleprice: sellPrice,
         stock: m.availability != null ? Math.max(0, parseInt(m.availability, 10)) : (raw.availability != null ? Math.max(0, parseInt(raw.availability, 10)) : 0),
         variant_color: m.color ? String(m.color).trim() : null,
-        variant_size: (m.size || m.model) ? String(m.size || m.model).trim() : null,
+        variant_size: rawSize,
         attributes: m.attributes || null,
         images: null,
         country_of_origin: raw.madein ? String(raw.madein).trim() : null,
         is_active: true,
+        normalized_size_final: _sz.canonical || rawSize || null,
+        size_type: _sz.sizeType || null,
       });
     }
   } else {
@@ -158,6 +170,8 @@ function transformBdroppyProduct(raw, imgBase, marginConfig) {
       images: null,
       country_of_origin: raw.madein ? String(raw.madein).trim() : null,
       is_active: true,
+      normalized_size_final: null,
+      size_type: null,
     });
   }
 
@@ -343,8 +357,9 @@ async function upsertProductAndVariants(client, transformed) {
           `UPDATE product_variants SET
             vendor_id = $1, sku = $2, vendor_product_id = $3, vendormrp = $4, vendorsaleprice = $5,
             mrp = $6, price = $7, stock = $8, attributes = $9::jsonb, variant_color = $10, variant_size = $11,
-            barcode = $12, country_of_origin = $13, is_active = $14, updated_at = now()
-          WHERE id = $15`,
+            barcode = $12, country_of_origin = $13, is_active = $14,
+            size_type = $15, normalized_size_final = $16, updated_at = now()
+          WHERE id = $17`,
           [
             BDROPPY_VENDOR_ID,
             v.sku,
@@ -360,6 +375,8 @@ async function upsertProductAndVariants(client, transformed) {
             v.barcode,
             v.country_of_origin,
             v.is_active !== undefined ? v.is_active : true,
+            v.size_type || null,
+            v.normalized_size_final || null,
             vid,
           ]
         );
@@ -368,8 +385,9 @@ async function upsertProductAndVariants(client, transformed) {
         await client.query(
           `INSERT INTO product_variants (
             id, vendor_id, product_id, sku, barcode, vendor_product_id, vendormrp, vendorsaleprice, price, mrp,
-            stock, attributes, variant_color, variant_size, country_of_origin, is_active, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,now(),now())`,
+            stock, attributes, variant_color, variant_size, country_of_origin, is_active,
+            size_type, normalized_size_final, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,now(),now())`,
           [
             variantId,
             BDROPPY_VENDOR_ID,
@@ -387,6 +405,8 @@ async function upsertProductAndVariants(client, transformed) {
             v.variant_size,
             v.country_of_origin,
             v.is_active !== undefined ? v.is_active : true,
+            v.size_type || null,
+            v.normalized_size_final || null,
           ]
         );
       }

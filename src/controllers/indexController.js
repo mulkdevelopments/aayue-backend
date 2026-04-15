@@ -44,6 +44,7 @@ const accessRequestController = require("./accessRequestController");
 const heroSlideController = require("./adminController/heroSlideController");
 const userHeroSlideController = require("./userController/heroSlideController");
 const adminManagementController = require("./adminController/adminManagementController");
+const sizeNormalizationController = require("./adminController/sizeNormalizationController");
 
 const indexCtrl = {
   userAuthController,
@@ -92,6 +93,7 @@ const indexCtrl = {
   heroSlideController,
   userHeroSlideController,
   adminManagementController,
+  sizeNormalizationController,
 };
 
 module.exports = indexCtrl;

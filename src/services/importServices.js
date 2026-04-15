@@ -1367,8 +1367,12 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
              weight = $11,
              attributes = $12,
              images = $13,
+             variant_color = COALESCE($14, variant_color),
+             variant_size = COALESCE($15, variant_size),
+             size_type = COALESCE($16, size_type),
+             normalized_size_final = COALESCE($17, normalized_size_final),
              updated_at = now()
-           WHERE id = $14`,
+           WHERE id = $18`,
                     [
                         VENDOR_ID,
                         rawVendorMrp || null,
@@ -1383,6 +1387,10 @@ async function upsertProductAndVariant(client, transformed, opts = {}) {
                         v.weight || null,
                         helpers.toJsonb(v.attributes || null),
                         helpers.toJsonb(v.images || null),
+                        v.variant_color || null,
+                        v.variant_size || null,
+                        v.size_type || null,
+                        v.normalized_size_final || null,
                         vid
                     ]
                 );

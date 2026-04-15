@@ -599,4 +599,21 @@ router.post('/vendor-orders/:orderId/mark-paid', vendorOrderCtrl.markVendorPaid)
 router.post('/vendor-orders/:orderId/unmark-paid', vendorOrderCtrl.unmarkVendorPaid);
 router.post('/vendor-orders/:orderId/place', vendorOrderCtrl.manualPlaceOrder);
 
+/** ================== Size Normalization Routes ================== */
+const sizeNormCtrl = indexCtrl.sizeNormalizationController;
+
+router.get('/size-normalization/status', sizeNormCtrl.getStatus);
+router.get('/size-normalization/status/:categoryId', sizeNormCtrl.getCategoryStatus);
+router.get('/size-normalization/tables', sizeNormCtrl.listTables);
+router.get('/size-normalization/tables/:id', sizeNormCtrl.getTable);
+router.post('/size-normalization/tables', sizeNormCtrl.createTable);
+router.put('/size-normalization/tables/:id', sizeNormCtrl.updateTable);
+router.delete('/size-normalization/tables/:id', sizeNormCtrl.deleteTable);
+router.get('/size-normalization/assignments', sizeNormCtrl.getAssignments);
+router.post('/size-normalization/assignments', sizeNormCtrl.upsertAssignment);
+router.post('/size-normalization/dry-run', sizeNormCtrl.dryRun);
+router.post('/size-normalization/execute', sizeNormCtrl.execute);
+router.get('/size-normalization/history', sizeNormCtrl.getHistory);
+router.post('/size-normalization/rollback/:runId', sizeNormCtrl.rollback);
+
 module.exports = router;

@@ -19,6 +19,8 @@ const getPQueue = async () => {
 
 const helpers = require('./luxuryImportHelper');
 const { normalizeBrandName } = require("../../../utils/normalize");
+const { normalizeSize } = require("../../../utils/normalizeSize");
+const { categoryHintFromPath, genderHintFromPath } = require("../../../utils/sizeConversion");
 const { isBrandExcluded } = require("../excludedBrands");
 
 const logger = pino({ level: process.env.IMPORT_LOG_LEVEL || 'info' });
@@ -213,6 +215,9 @@ async function upsertProductAndVariant(client, transformed) {
         }
 
         // VARIANTS — create/update from size_quantity
+        const _catHint = categoryHintFromPath(category_path);
+        const _genHint = genderHintFromPath(category_path) || product.gender || null;
+
         const createdVariants = [];
         for (const v of variants) {
             // Decide SKU for variant: if product_sku + size present, make `${product_sku}-${size}`, else use v.sku or fallback
@@ -220,6 +225,10 @@ async function upsertProductAndVariant(client, transformed) {
                 const base = product.product_sku || productProductId || productId;
                 v.sku = v.variant_size ? `${base}-${v.variant_size}` : `${base}-${Math.random().toString(36).slice(2, 8)}`;
             }
+
+            const _sz = normalizeSize(v.variant_size, _catHint, _genHint);
+            const nsfVal = _sz.canonical || v.variant_size || null;
+            const stVal = _sz.sizeType || null;
 
             const varRes = await client.query(
                 'SELECT id FROM product_variants WHERE sku = $1 AND product_id = $2 AND deleted_at IS NULL',
@@ -234,8 +243,9 @@ async function upsertProductAndVariant(client, transformed) {
             vendor_id=$1,
             vendormrp=$2, vendorsaleprice=$3, price=$4, mrp=$5, stock=$6, weight=$7,
             attributes=$8, images=$9, updated_at=now(),
-            variant_color=$10, variant_size=$11, country_of_origin=$12, is_active=$13
-          WHERE id=$14
+            variant_color=$10, variant_size=$11, country_of_origin=$12, is_active=$13,
+            size_type=$14, normalized_size_final=$15
+          WHERE id=$16
           `,
                     [
                         VENDOR_ID,
@@ -251,6 +261,8 @@ async function upsertProductAndVariant(client, transformed) {
                         v.variant_size || null,
                         v.country_of_origin || null,
                         v.is_active !== undefined ? v.is_active : true,
+                        stVal,
+                        nsfVal,
                         vid,
                     ]
                 );
@@ -263,13 +275,14 @@ async function upsertProductAndVariant(client, transformed) {
             price, mrp, stock, weight, dimension, length, width, height,
             attributes, images, image_urls, video1, video2, vendormrp, vendorsaleprice,
             tax, tax1, tax2, tax3, variant_color, variant_size,
-            country_of_origin, is_active, normalized_size, normalized_color, created_at, updated_at
+            country_of_origin, is_active, normalized_size, normalized_color,
+            size_type, normalized_size_final, created_at, updated_at
           ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,
             $8,$9,$10,$11,$12::jsonb,$13,$14,$15,
             $16::jsonb,$17::jsonb,$18::jsonb,$19,$20,$21,$22,
             $23::jsonb,$24,$25,$26,$27,$28,
-            $29,$30,$31,$32, now(), now()
+            $29,$30,$31,$32,$33,$34, now(), now()
           ) RETURNING id
         `;
 
@@ -306,9 +319,11 @@ async function upsertProductAndVariant(client, transformed) {
                     v.is_active !== undefined ? v.is_active : true, // $30
                     v.normalized_size || null, // $31
                     v.normalized_color || null, // $32
+                    stVal, // $33
+                    nsfVal, // $34
                 ];
 
-                if (variantVals.length !== 32) {
+                if (variantVals.length !== 34) {
                     throw new Error(`variantVals length mismatch: ${variantVals.length}`);
                 }
 
