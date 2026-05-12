@@ -18,6 +18,7 @@ const {
 } = require("../../utils/colorFilterSql");
 const filterCache = require("../../utils/filterCache");
 const { WOMEN_CLOTHING, MEN_CLOTHING, WOMEN_SHOES, MEN_SHOES, ALPHA_SORT_ORDER } = require("../../utils/sizeConversion");
+const { normalizeProductAfterCategoryMap } = require("../../services/sizeNormalizationService");
 
 function validateCategoryIds(category_ids = []) {
   if (!Array.isArray(category_ids)) return false;
@@ -1910,6 +1911,8 @@ module.exports.mapProductToOurCategory = catchAsync(async (req, res, next) => {
       );
 
       mappedResults.push(ins.rows[0]);
+
+      try { await normalizeProductAfterCategoryMap(pid, our_category_id, client); } catch (_) {}
     }
 
     await client.query("COMMIT");

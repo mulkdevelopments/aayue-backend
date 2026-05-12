@@ -513,6 +513,110 @@ async function upsertAssignment(categoryId, tableId, filterType) {
   `, [categoryId, tableId, filterType]);
 }
 
+/**
+ * Normalize variants for a single product after it's mapped to a category.
+ * Looks up the conversion table assigned to that category, then applies
+ * pattern + country matching on the product's variants.
+ */
+async function normalizeProductAfterCategoryMap(productId, categoryId, client) {
+  const db = client || pool;
+
+  const { rows: assignment } = await db.query(
+    `WITH RECURSIVE cat_chain AS (
+       SELECT id, parent_id FROM categories WHERE id = $1
+       UNION ALL
+       SELECT c.id, c.parent_id FROM categories c JOIN cat_chain cc ON cc.id = c.parent_id
+     )
+     SELECT csm.table_id, csm.filter_type
+     FROM category_size_table_map csm
+     JOIN cat_chain cc ON cc.id = csm.category_id
+     WHERE csm.table_id IS NOT NULL
+     LIMIT 1`,
+    [categoryId]
+  );
+
+  if (!assignment.length) return { mapped: 0 };
+
+  const tableId = assignment[0].table_id;
+  const convRows = await getConversionRows(tableId);
+  if (!convRows.length) return { mapped: 0 };
+
+  const convValues = buildConvValues(convRows);
+
+  // Round 1: pattern match (system prefix/suffix in variant_size)
+  const r1Sql = `
+    WITH conv(sys, num, target) AS (VALUES ${convValues})
+    UPDATE product_variants pv SET normalized_size_final = sub.target
+    FROM (
+      SELECT DISTINCT ON (pv2.id) pv2.id, c.target
+      FROM product_variants pv2
+      CROSS JOIN conv c
+      WHERE pv2.product_id = $1 AND pv2.deleted_at IS NULL
+      AND pv2.normalized_size_final IS NULL
+      AND (
+        UPPER(TRIM(pv2.variant_size)) ~ ('^' || c.num || '\\s*' || c.sys || '$')
+        OR UPPER(TRIM(pv2.variant_size)) ~ ('^' || c.sys || '\\s*' || c.num || '$')
+        OR (pv2.size_type IS NOT NULL AND UPPER(pv2.size_type) LIKE '%' || c.sys || '%'
+            AND TRIM(regexp_replace(pv2.variant_size, '[^0-9.]', '', 'g')) = c.num)
+        OR (TRIM(regexp_replace(UPPER(pv2.variant_size), '[^0-9.]', '', 'g')) = c.num
+            AND UPPER(pv2.variant_size) LIKE '%' || c.sys || '%')
+      )
+    ) sub
+    WHERE pv.id = sub.id
+  `;
+  const r1 = await db.query(r1Sql, [productId]);
+
+  // Round 1b: plain numeric match for EU/IT systems
+  const r1bSql = `
+    WITH conv(sys, num, target) AS (VALUES ${convValues})
+    UPDATE product_variants pv SET normalized_size_final = sub.target
+    FROM (
+      SELECT DISTINCT ON (pv2.id) pv2.id, c.target
+      FROM product_variants pv2
+      CROSS JOIN conv c
+      WHERE pv2.product_id = $1 AND pv2.deleted_at IS NULL
+      AND pv2.normalized_size_final IS NULL
+      AND TRIM(regexp_replace(pv2.variant_size, '[^0-9.]', '', 'g')) = c.num
+      AND c.sys IN ('EU','IT')
+    ) sub
+    WHERE pv.id = sub.id
+  `;
+  const r1b = await db.query(r1bSql, [productId]);
+
+  // Round 2: country of origin
+  let r2Total = 0;
+  for (const [country, sys] of Object.entries(COUNTRY_TO_SYSTEM)) {
+    const r2Sql = `
+      WITH conv(sys, num, target) AS (VALUES ${convValues})
+      UPDATE product_variants pv SET normalized_size_final = sub.target
+      FROM (
+        SELECT DISTINCT ON (pv2.id) pv2.id, c.target
+        FROM product_variants pv2
+        CROSS JOIN conv c
+        WHERE pv2.product_id = $1 AND pv2.deleted_at IS NULL
+        AND pv2.normalized_size_final IS NULL
+        AND LOWER(TRIM(pv2.country_of_origin)) = $2
+        AND c.sys = '${sys}'
+        AND TRIM(regexp_replace(pv2.variant_size, '[^0-9.]', '', 'g')) = c.num
+      ) sub
+      WHERE pv.id = sub.id
+    `;
+    const r2 = await db.query(r2Sql, [productId, country]);
+    r2Total += r2.rowCount;
+  }
+
+  // Set UNI for empty/nosize variants that are still null
+  const uniSql = `
+    UPDATE product_variants SET normalized_size_final = 'UNI'
+    WHERE product_id = $1 AND deleted_at IS NULL
+    AND normalized_size_final IS NULL
+    AND (variant_size IS NULL OR UPPER(TRIM(variant_size)) IN ('', 'UNI', 'NOSIZE', 'ONE SIZE'))
+  `;
+  await db.query(uniSql, [productId]);
+
+  return { mapped: r1.rowCount + r1b.rowCount + r2Total };
+}
+
 module.exports = {
   getCategoryTree,
   getCategoryStatus,
@@ -528,4 +632,5 @@ module.exports = {
   deleteTable,
   getAssignments,
   upsertAssignment,
+  normalizeProductAfterCategoryMap,
 };

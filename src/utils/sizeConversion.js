@@ -163,6 +163,8 @@ function categoryHintFromPath(categoryPath) {
   if (!categoryPath) return "clothing";
   const lc = String(categoryPath).toLowerCase();
   if (FOOTWEAR_KEYWORDS.some((kw) => lc.includes(kw))) return "footwear";
+  if (/\bring\b/.test(lc)) return "ring";
+  if (/\bwatch\b|\bglasses\b|\bsunglasses\b|\bcufflink\b|\bbrooch\b|\bnecklace\b|\bearring\b/.test(lc)) return "accessory_nosize";
   return "clothing";
 }
 

@@ -1072,7 +1072,7 @@ const ProductService = {
       user_id = null,
     } = options;
 
-    const whereClauses = ["p.deleted_at IS NULL"];
+    const whereClauses = ["p.deleted_at IS NULL", "p.is_active = TRUE"];
     // ✅ Filter out products from inactive vendors
     whereClauses.push(`(p.vendor_id IS NULL OR EXISTS (SELECT 1 FROM vendors v WHERE v.id = p.vendor_id AND v.status = 'active' AND v.deleted_at IS NULL))`);
     const params = [];

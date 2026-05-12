@@ -1,6 +1,7 @@
 const dbPool = require("../db/dbConnection");
 const ProductService = require("./productService");
 const { getAICategorySuggestions } = require("./aiCategorySuggestionService");
+const { normalizeProductAfterCategoryMap } = require("./sizeNormalizationService");
 
 const MAX_LOGS = 200;
 
@@ -316,8 +317,12 @@ async function runAiCategoryMappingForProduct(
       for (const cid of uniqueIds) {
         await mapProductToCategory(productId, cid);
       }
+      for (const cid of uniqueIds) {
+        try { await normalizeProductAfterCategoryMap(productId, cid); } catch (_) {}
+      }
     } else {
       await mapProductToCategory(productId, top.category_id);
+      try { await normalizeProductAfterCategoryMap(productId, top.category_id); } catch (_) {}
     }
 
     job.success += 1;

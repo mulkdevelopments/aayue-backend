@@ -52,10 +52,36 @@ function normalizeSize(rawSize, categoryHint, genderHint) {
   const cat = (categoryHint || "clothing").toLowerCase();
   const gen = (genderHint || "").toLowerCase();
   const isShoe = cat === "footwear" || cat === "shoes";
+  const isRing = cat === "ring";
+  const isNoSizeAccessory = cat === "accessory_nosize";
 
   // ── One Size / NOSIZE / UNI ───────────────────────────────────
   if (UNI_VALUES.has(lower)) {
     return { canonical: "One Size", sizeType: "One Size", detectedSystem: "uni" };
+  }
+
+  // ── No-size accessories (watches, glasses, cufflinks, etc.) ───
+  if (isNoSizeAccessory) {
+    return { canonical: "UNI", sizeType: "One Size", detectedSystem: "uni" };
+  }
+
+  // ── Ring sizes: extract US number from compound EU|US formats ──
+  if (isRing) {
+    if (lower === "" || !s) return { canonical: "UNI", sizeType: "One Size", detectedSystem: "uni" };
+    const usFromPipe = s.match(/US\s*(\d+)/i);
+    if (usFromPipe) return { canonical: usFromPipe[1], sizeType: "Accessory", detectedSystem: "us" };
+    const plainNum = s.match(/^(\d+)$/);
+    if (plainNum) {
+      const n = parseInt(plainNum[1]);
+      if (n >= 3 && n <= 15) return { canonical: String(n), sizeType: "Accessory", detectedSystem: "us" };
+    }
+    const alphaKey2 = lower.replace(/\s/g, "");
+    const alpha2 = ALPHA_CANONICAL[alphaKey2];
+    if (alpha2) {
+      const alphaToUS = { S: "6", M: "8", L: "10" };
+      return { canonical: alphaToUS[alpha2] || s, sizeType: "Accessory", detectedSystem: "us" };
+    }
+    return { canonical: s, sizeType: "Accessory", detectedSystem: "us" };
   }
 
   // ── Explicit waist-inseam: "30W-32L", "31W 32L", "30W/32L" ──
